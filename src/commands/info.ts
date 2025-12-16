@@ -1,5 +1,7 @@
 import { Context, h } from 'koishi'
 
+type Element = any
+
 import { Config } from '../config'
 import { formatKeywords, formatRange, listJoin } from '../utils'
 
@@ -17,7 +19,7 @@ export async function apply(ctx: Context, config: Config) {
     if (!info) return session?.i18n('memes-api.errors.no-such-meme', [query])
 
     const p = info.params_type
-    const msg: h[][] = [
+    const msg: Element[][] = [
       session.i18n('memes-api.info.key', [info.key]),
       session.i18n('memes-api.info.keywords', [formatKeywords(info.keywords)]),
     ]

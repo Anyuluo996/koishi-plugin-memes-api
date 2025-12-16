@@ -1,7 +1,7 @@
 {
-  "name": "koishi-plugin-memes-api",
+  "name": "@anyul/koishi-plugin-memes-api",
   "description": "表情包制作插件调用 API 版",
-  "version": "1.0.3",
+  "version": "1.0.43",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "files": [
@@ -9,8 +9,8 @@
     "dist"
   ],
   "license": "MIT",
-  "author": "LgCookie <lgc2333@126.com>",
-  "homepage": "https://github.com/lgc-KoiDev/koishi-plugin-memes-api",
+  "author": "anyul <1247572395@qq.com>",
+  "homepage": "https://github.com/Anyuluo996/koishi-plugin-memes-api",
   "scripts": {
     "build:console": "koishi-console build"
   },
@@ -57,6 +57,6 @@
   },
   "dependencies": {
     "meme-generator-api": "^0.1.0",
-    "p-limit": "^6.2.0"
+    "p-limit": "^3.1.0"
   }
 }

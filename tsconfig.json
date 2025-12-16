@@ -1,8 +1,20 @@
 {
-  "extends": "../../tsconfig.base",
   "compilerOptions": {
+    "target": "ES2020",
+    "module": "CommonJS",
+    "lib": ["ES2021"],
+    "jsx": "react",
+    "jsxFactory": "h",
+    "declaration": true,
+    "outDir": "lib",
     "rootDir": "src",
-    "outDir": "lib"
+    "strict": false,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "allowSyntheticDefaultImports": true
   },
-  "include": ["src"]
+  "include": ["src/**/*", "src/locales/**/*"],
+  "exclude": ["node_modules", "lib"]
 }

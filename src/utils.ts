@@ -133,7 +133,7 @@ export function checkInRange(value: number, min: number, max: number): boolean {
 }
 
 export function constructBlobFromFileResp(resp: FileResponse): Blob {
-  return new Blob([resp.data], { type: resp.type })
+  return new Blob([resp.data], { type: (resp as any).headers?.['content-type'] || 'image/png' })
 }
 
 export function formatRange(min: number, max: number): string {

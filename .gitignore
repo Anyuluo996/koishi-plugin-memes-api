@@ -16,5 +16,11 @@ tsconfig.tsbuildinfo
 *.ntvs*
 *.njsproj
 *.sln
-
+*.md
+./koishi-plugin-memes
+./koishi-plugin-memes/*
 .yarn
+.claude/settings.local.json
+*.sh
+*.js
+
