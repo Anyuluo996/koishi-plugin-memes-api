@@ -1,7 +1,7 @@
 {
   "name": "@anyul/koishi-plugin-memes-api",
   "description": "表情包制作插件调用 API 版",
-  "version": "1.0.43",
+  "version": "1.0.44",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "files": [
@@ -12,6 +12,7 @@
   "author": "anyul <1247572395@qq.com>",
   "homepage": "https://github.com/Anyuluo996/koishi-plugin-memes-api",
   "scripts": {
+    "build": "tsc -p tsconfig.build.json",
     "build:console": "koishi-console build"
   },
   "keywords": [

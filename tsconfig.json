@@ -6,6 +6,7 @@
     "jsx": "react",
     "jsxFactory": "h",
     "declaration": true,
+    "emitDeclarationOnly": false,
     "outDir": "lib",
     "rootDir": "src",
     "strict": false,

@@ -1,6 +1,6 @@
 import { Command, Context, h, paramCase, Session, Logger } from 'koishi'
 
-// 适配不同版本的 Element 类型
+// 适配 Element 类型
 type Element = any
 
 import {
@@ -92,10 +92,7 @@ export async function apply(ctx: Context, config: Config) {
     bool: 'boolean',
   }
 
-  // --- 省略中间未变动的辅助函数 transformToKoishiOptions, applyOptionEffects, resolveArgs 等 ---
-  // --- 为了完整性，你可以保留原文件里这一部分，直接看最下面的 registerGenerateCmd 即可 ---
-  // 但为了复制方便，这里还是提供完整文件
-
+  // --- Transform Logic ---
   ctx.$.transformToKoishiOptions = (args: MemeArgsResponse) => {
     const options: OptionInfo[] = []
     for (const arg of args.parser_options) {
@@ -105,31 +102,17 @@ export async function apply(ctx: Context, config: Config) {
         trimmedNames.filter((v) => /^[a-zA-Z0-9-_]+$/.test(v)).sort((v) => -v.length)[0]
       const aliases = trimmedNames.filter((v) => v !== name)
       if (!arg.args) {
-        options.push({
-          names: [name, ...aliases],
-          argName: name,
-          type: 'boolean',
-          description: arg.help_text ?? '',
-        })
+        options.push({ names: [name, ...aliases], argName: name, type: 'boolean', description: arg.help_text ?? '' })
         continue
       }
-      const transformArgType = (value: string): string => {
-        if (value in ctx.$.argTypeMap) return ctx.$.argTypeMap[value]
-        logger.warn(`Unsupported arg type ${value} in arg ${name}`)
-        return 'string'
-      }
+      const transformArgType = (value: string): string => value in ctx.$.argTypeMap ? ctx.$.argTypeMap[value] : 'string'
       const withSuffix = arg.args && arg.args.length > 1
       const aliasesSuffixed = withSuffix ? aliases.map((v) => `${v}-${name}`) : aliases
       for (const argInfo of arg.args) {
         const argName = argInfo?.name ?? name
         const argType = argInfo ? transformArgType(argInfo.value) : 'boolean'
         const nameSuffixed = withSuffix ? `${name}-${paramCase(argName)}` : name
-        options.push({
-          names: [nameSuffixed, ...aliasesSuffixed],
-          argName,
-          type: argType,
-          description: arg.help_text ?? '',
-        })
+        options.push({ names: [nameSuffixed, ...aliasesSuffixed], argName, type: argType, description: arg.help_text ?? '' })
       }
     }
     return options
@@ -204,6 +187,7 @@ export async function apply(ctx: Context, config: Config) {
     return { images: imageInfoKeys.map(k => imageMap[k]), userInfos: imageInfoKeys.map(k => userInfoMap[k]) }
   }
 
+  // Error Handlers
   ctx.$.handleResolveArgsError = (session, e) => {
     if (e instanceof ArgSyntaxError) {
         logger.warn(e.message)
@@ -250,17 +234,12 @@ export async function apply(ctx: Context, config: Config) {
       return null
     }
 
-    const subCmd: Command =
-      (cmdGenerate as any).subcommand(`.${key} [args:el]`, { strictOptions: true, hidden: true })
+    const subCmd = (cmdGenerate as any).subcommand(`.${key} [args:el]`, { strictOptions: true, hidden: true })
     registeredNames.add(key)
 
     for (const kw of keywords) {
-      if (registeredNames.has(kw)) continue
-      try {
-        (subCmd as any).alias(`.${kw}`)
-        registeredNames.add(kw)
-      } catch (error) {
-        logger.warn(`Failed to register alias ".${kw}" for "${key}": ${error.message}`)
+      if (!registeredNames.has(kw)) {
+        try { (subCmd as any).alias(`.${kw}`); registeredNames.add(kw) } catch (e) { logger.warn(`Alias conflict: ${kw}`) }
       }
     }
 
@@ -272,31 +251,10 @@ export async function apply(ctx: Context, config: Config) {
       try {
         const guildId = (session as any).guildId || 'private'
         const platform = (session as any).platform
-        const userId = session.userId
 
-        // ============================================
-        // 🚨 1. 最高优先级：全局黑名单检查 🚨
-        // ============================================
-        // 检查表情的 KEY 和所有关联的 KEYWORD 是否在黑名单中
-        const isGlobalBanned = await ctx.$.isMemeBlacklisted(info.key, info.keywords)
-        if (isGlobalBanned) {
-          // 如果被全局拉黑，即使群组开启了，也不许用
-          logger.debug(`Meme "${info.key}" is global blacklisted. blocked.`)
-          // 选择性提示：session.send("❌ 该表情已被管理员全局禁用。")
-          return
-        }
-
-        // ============================================
-        // 2. 第二优先级：群组开启/禁用检查
-        // ============================================
+        // 1. 群组开启检查
         const isGuildEnabled = await ctx.$.isMemeGuildEnabled(guildId, platform, info.key)
-        if (!isGuildEnabled) {
-          // 被群组禁用
-          return
-        }
-
-        // (之前删掉了最开始的 userId check)
-        // ----------------------------------------
+        if (!isGuildEnabled) return
 
         if (config.generateSubCommandCountToFather) {
           const msg = await ctx.$.checkAndCountToGenerate(session)
@@ -307,7 +265,6 @@ export async function apply(ctx: Context, config: Config) {
           options = await ctx.$.applyOptionEffects(session, options, info)
         }
 
-        // 2. 解析参数：解析完才知道谁是目标用户 (resolveArgs)
         let resolvedArgs: ResolvedArgs
         try {
           resolvedArgs = await ctx.$.resolveArgs(session, args ?? [])
@@ -316,38 +273,41 @@ export async function apply(ctx: Context, config: Config) {
         }
         const { imageInfos, texts } = resolvedArgs
 
-        // 处理自动补充参数
+        // 处理参数补全 (自动填充自己)
         const { min_images, max_images, min_texts, max_texts, default_texts } = info.params_type
+
         const autoUseAvatar = !!(
           (config.autoUseSenderAvatarWhenOnlyOne && !imageInfos.length && min_images === 1) ||
           (config.autoUseSenderAvatarWhenOneLeft && imageInfos.length && imageInfos.length + 1 === min_images)
         )
         if (autoUseAvatar) {
-          // 这里会自动把 session.userId 加到开头
           imageInfos.unshift({ userId: session.userId })
         }
         if (!texts.length && config.autoUseDefaultTexts) {
           texts.push(...default_texts)
         }
 
-        // ============================================
-        //  关键逻辑修改：检测 target 是否被屏蔽 (包含@的人 和 自动补全的人)
-        // ============================================
+        // ========================================================
+        // 2. 🔴 修正：用户屏蔽检查
+        // 规则：
+        // A. 必须是图片里的“素材”人物。
+        // B. 如果素材 ID 与 发送者 ID 一致，则允许生成（自己可以迫害自己）。
+        // ========================================================
         if (guildId !== 'private') {
-          // imageInfos 里的每个带 userId 的都是我们的目标对象
-          // 如果某个人屏蔽了这个表情，我们就阻止生成
           for (const item of imageInfos) {
             if ('userId' in item && item.userId) {
+              // 关键逻辑：如果是自己发的，即使自己屏蔽了自己也无所谓
+              if (item.userId === session.userId) continue 
+
               const isBlocked = await ctx.$.isUserMemeBlocked(guildId, platform, item.userId, info.key)
               if (isBlocked) {
-                // 如果发现某个素材用户已屏蔽，终止生成并提示
-                await session.send(`🚫 用户 ${item.userId} 拒绝以此表情 (${info.key}) 出演。`)
+                // await session.send(`🚫 用户 ${item.userId} 拒绝了以此表情 (${info.key}) 出演。`) // 可选：开启详细提示
                 return
               }
             }
           }
         }
-        // ============================================
+        // ========================================================
 
         if (!checkInRange(imageInfos.length, min_images, max_images)) {
           return config.silentShortcut && session.inShortcut
@@ -385,11 +345,7 @@ export async function apply(ctx: Context, config: Config) {
           return ctx.$.handleRenderError(session, e)
         }
 
-        // 成功后记录 (可选: 仅记录发起人)
-        try {
-          await ctx.$.recordMemeUsage(session, info.key)
-        } catch (e) { /* ignore */ }
-
+        ctx.$.recordMemeUsage(session, info.key).catch(() => {})
         return h.image(await img.arrayBuffer(), img.type)
 
       } catch (error: any) {
@@ -399,9 +355,7 @@ export async function apply(ctx: Context, config: Config) {
   }
 
   ctx.$.reRegisterGenerateCommands = async () => {
-    for (const cmd of generateSubCommands) {
-        try { (cmd as any).dispose() } catch (e) {}
-    }
+    for (const cmd of generateSubCommands) { try { (cmd as any).dispose() } catch (_) {} }
     generateSubCommands.length = 0
     const registeredNames = new Set<string>()
     logger.info(`Starting to register ${Object.keys(ctx.$.infos).length} memes...`)
