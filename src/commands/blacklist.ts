@@ -20,8 +20,10 @@ export async function apply(ctx: Context, config: Config) {
 
     // 刷新逻辑
     try {
+      // 1. 重新注册命令（这会处理 .alias 的移除）
       await ctx.$.reRegisterGenerateCommands()
-      // ...
+      // 2. 刷新快捷指令（这会移除正则触发）
+      await ctx.$.refreshShortcuts?.()
     } catch (e) {
       logger.warn(e)
     }

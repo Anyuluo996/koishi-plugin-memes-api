@@ -29,6 +29,7 @@ export interface ListConfig {
 }
 
 export interface OtherCommandConfig {
+  debug: boolean
   randomMemeShowInfo: boolean
   generateSubCommandCountToFather: boolean
   randomCommandCountToGenerate: boolean
@@ -92,6 +93,7 @@ export const ListConfigSchema = Schema.object({
 }).description('表情列表配置')
 
 export const OtherCommandConfigSchema = Schema.object({
+  debug: Schema.boolean().default(false).description('开启调试模式'),
   randomMemeShowInfo: Schema.boolean().default(true).description('随机表情时显示关键词'),
   generateSubCommandCountToFather: Schema.boolean().default(false).description('计入父指令调用次数'),
   randomCommandCountToGenerate: Schema.boolean().default(false).description('随机表情计入生成指令次数'),

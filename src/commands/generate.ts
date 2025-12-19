@@ -83,6 +83,7 @@ export async function apply(ctx: Context, config: Config) {
     return session?.execute('help meme.generate')
   })
 
+  // 使用数组追踪已注册的子命令，方便注销
   const generateSubCommands: Command[] = []
 
   ctx.$.argTypeMap = {
@@ -190,8 +191,8 @@ export async function apply(ctx: Context, config: Config) {
   // Error Handlers
   ctx.$.handleResolveArgsError = (session, e) => {
     if (e instanceof ArgSyntaxError) {
-        logger.warn(e.message)
-        return config.silentShortcut && session.inShortcut ? undefined : session.text(ArgSyntaxError.getI18NKey(e), e)
+      logger.warn(e.message)
+      return config.silentShortcut && session.inShortcut ? undefined : session.text(ArgSyntaxError.getI18NKey(e), e)
     }
     return undefined
   }
@@ -204,8 +205,8 @@ export async function apply(ctx: Context, config: Config) {
 
   ctx.$.handleRenderError = (session, e) => {
     if (e instanceof MemeError && e.type) {
-        logger.warn(e)
-        return config.silentShortcut && session.inShortcut && (config.moreSilent || (e.response.status <= 540 && e.response.status > 560)) ? undefined : [e.memeMessage] as any
+      logger.warn(e)
+      return config.silentShortcut && session.inShortcut && (config.moreSilent || (e.response.status <= 540 && e.response.status > 560)) ? undefined : [e.memeMessage] as any
     }
     return undefined
   }
@@ -222,147 +223,219 @@ export async function apply(ctx: Context, config: Config) {
     for (const opt of ctx.$.transformToKoishiOptions(args)) {
       const { names, argName, type, description } = opt
       const [name, ...aliases] = names
-      ;(cmd as any).option(name, `[${argName}:${type}] ${description}`, { aliases })
+        ; (cmd as any).option(name, `[${argName}:${type}] ${description}`, { aliases })
     }
     return cmd
   }
 
-  const registerGenerateCmd = (info: MemeInfoResponse, registeredNames: Set<string>) => {
-    const { key, keywords } = info
-    if (registeredNames.has(key)) {
-      logger.warn(`Skip registering duplicate meme key: ${key}`)
-      return null
-    }
+  // ========================================================================
+  // 核心修复：重新注册命令的完整逻辑 (从 index.tsx 迁移并整合)
+  // ========================================================================
+  ctx.$.reRegisterGenerateCommands = async () => {
+    // 1. 清理现有命令
+    for (const cmd of generateSubCommands) { try { (cmd as any).dispose() } catch (_) { } }
+    generateSubCommands.length = 0
 
-    const subCmd = (cmdGenerate as any).subcommand(`.${key} [args:el]`, { strictOptions: true, hidden: true })
-    registeredNames.add(key)
+    const registeredNames = new Set<string>()
+    const blacklistRaw = await ctx.$.getBlacklistedKeywords()
+    const blacklist = new Set(blacklistRaw.map(k => k.toLowerCase()))
+    logger.info(`Starting to register ${Object.keys(ctx.$.infos).length} memes...`)
 
-    for (const kw of keywords) {
-      if (!registeredNames.has(kw)) {
-        try { (subCmd as any).alias(`.${kw}`); registeredNames.add(kw) } catch (e) { logger.warn(`Alias conflict: ${kw}`) }
+    // 2. 预处理：解决关键词冲突 (index.tsx 中的高级逻辑)
+    const keywordMap = new Map()
+    for (const info of Object.values(ctx.$.infos)) {
+      for (const keyword of info.keywords) {
+        if (!keywordMap.has(keyword)) keywordMap.set(keyword, [])
+        keywordMap.get(keyword).push(info)
       }
     }
 
-    registerGenerateOptions(subCmd, info)
-
-    return (subCmd as any).action(async ({ session, options }, args) => {
-      if (!session) return
-
-      try {
-        const guildId = (session as any).guildId || 'private'
-        const platform = (session as any).platform
-
-        // 1. 群组开启检查
-        const isGuildEnabled = await ctx.$.isMemeGuildEnabled(guildId, platform, info.key)
-        if (!isGuildEnabled) return
-
-        if (config.generateSubCommandCountToFather) {
-          const msg = await ctx.$.checkAndCountToGenerate(session)
-          if (msg) return msg
+    const resolvedKeywordsMap = new Map()
+    for (const info of Object.values(ctx.$.infos)) {
+      const resolvedKws = []
+      for (const keyword of info.keywords) {
+        const conflictingInfos = keywordMap.get(keyword)
+        if (conflictingInfos.length === 1) {
+          resolvedKws.push(keyword)
+        } else {
+          const index = conflictingInfos.indexOf(info)
+          const resolvedKeyword = `${keyword}${index + 1}`
+          resolvedKws.push(resolvedKeyword)
+          logger.info(`关键词冲突: "${keyword}" 被以下表情使用: ${conflictingInfos.map((i: any) => i.key).join(', ')}, 已自动添加数字后缀`)
         }
+      }
+      resolvedKeywordsMap.set(info.key, resolvedKws)
+    }
 
-        if (options) {
-          options = await ctx.$.applyOptionEffects(session, options, info)
-        }
+    // 3. 注册命令
+    for (const info of Object.values(ctx.$.infos)) {
+      // 检查 key 是否在黑名单中 (全局禁用该表情)
+      if (blacklist.has(info.key.toLowerCase())) {
+        logger.info(`Skip registering blacklisted meme: ${info.key}`)
+        continue
+      }
 
-        let resolvedArgs: ResolvedArgs
+      // 如果 key 已经被注册（异常情况），跳过
+      if (registeredNames.has(info.key)) {
+        logger.warn(`Skip registering duplicate meme key: ${info.key}`)
+        continue
+      }
+
+      // 注册子命令
+      const subCmd = (cmdGenerate as any).subcommand(`.${info.key} [args:el]`, (info as any).description || `生成${info.key}表情包`, { strictOptions: true, hidden: true })
+      registeredNames.add(info.key)
+
+      // 获取处理过冲突的关键词列表
+      const resolvedKws = resolvedKeywordsMap.get(info.key) || info.keywords
+
+      // 过滤掉：1.黑名单中的词 2.本次已经注册过的词
+      const validKeywords = resolvedKws.filter((kw: string) => {
+        if (blacklist.has(kw.toLowerCase())) return false
+        if (registeredNames.has(kw)) return false
+        return true
+      })
+
+      // 记录这些关键词已被占用
+      validKeywords.forEach((kw: string) => registeredNames.add(kw))
+
+      const blockedKeywords = resolvedKws.filter((kw: string) => blacklist.has(kw.toLowerCase()))
+      if (blockedKeywords.length > 0) {
+        logger.info(`表情 "${info.key}" 的以下关键词已被黑名单过滤: ${blockedKeywords.join(', ')}`)
+      }
+
+      // 别名注册逻辑
+      for (const kw of validKeywords) {
         try {
-          resolvedArgs = await ctx.$.resolveArgs(session, args ?? [])
+          (subCmd as any).alias(`.${kw}`)
         } catch (e) {
-          return ctx.$.handleResolveArgsError(session, e)
+          logger.warn(`Alias conflict: ${kw}`)
         }
-        const { imageInfos, texts } = resolvedArgs
+      }
 
-        // 处理参数补全 (自动填充自己)
-        const { min_images, max_images, min_texts, max_texts, default_texts } = info.params_type
+      registerGenerateOptions(subCmd, info)
 
-        const autoUseAvatar = !!(
-          (config.autoUseSenderAvatarWhenOnlyOne && !imageInfos.length && min_images === 1) ||
-          (config.autoUseSenderAvatarWhenOneLeft && imageInfos.length && imageInfos.length + 1 === min_images)
-        )
-        if (autoUseAvatar) {
-          imageInfos.unshift({ userId: session.userId })
-        }
-        if (!texts.length && config.autoUseDefaultTexts) {
-          texts.push(...default_texts)
-        }
+      // 动作定义
+      subCmd.action(async ({ session, options }: any, args: any) => {
+        if (!session) return
 
-        // ========================================================
-        // 2. 🔴 修正：用户屏蔽检查
-        // 规则：
-        // A. 必须是图片里的“素材”人物。
-        // B. 如果素材 ID 与 发送者 ID 一致，则允许生成（自己可以迫害自己）。
-        // ========================================================
-        if (guildId !== 'private') {
-          for (const item of imageInfos) {
-            if ('userId' in item && item.userId) {
-              // 关键逻辑：如果是自己发的，即使自己屏蔽了自己也无所谓
-              if (item.userId === session.userId) continue 
+        try {
+          const guildId = (session as any).guildId || 'private'
+          const platform = (session as any).platform
 
-              const isBlocked = await ctx.$.isUserMemeBlocked(guildId, platform, item.userId, info.key)
-              if (isBlocked) {
-                // await session.send(`🚫 用户 ${item.userId} 拒绝了以此表情 (${info.key}) 出演。`) // 可选：开启详细提示
-                return
+          if (config.debug) {
+            logger.info('[DEBUG] Triggered meme: %s, user: %s, guild: %s', info.key, session.userId, guildId)
+          }
+
+          // 1. 黑名单检查 (最高优先级)
+          // 注意：这里我们使用 info.key，确保即使是别名触发也能正确检查到主键
+          // 同时也传入 info.keywords，确保如果表情包含的关键词在黑名单中，也能被拦截
+          const isBlacklisted = await ctx.$.isMemeBlacklisted(info.key, info.keywords)
+          if (isBlacklisted) {
+            logger.info(`Blocked blacklisted meme execution: ${info.key}`)
+            return
+          }
+          if (config.debug) logger.info('[DEBUG] Blacklist check passed')
+
+          // 2. 检查群组启用状态
+          const isGuildEnabled = await ctx.$.isMemeGuildEnabled(guildId, platform, info.key)
+          if (!isGuildEnabled) {
+            if (config.debug) logger.info('[DEBUG] Guild disabled for meme: %s', info.key)
+            return
+          }
+          if (config.debug) logger.info('[DEBUG] Guild enabled check passed')
+
+          if (config.generateSubCommandCountToFather) {
+            const msg = await ctx.$.checkAndCountToGenerate(session)
+            if (msg) return msg
+          }
+
+          if (options) {
+            options = await ctx.$.applyOptionEffects(session, options, info)
+          }
+
+          let resolvedArgs: ResolvedArgs
+          try {
+            resolvedArgs = await ctx.$.resolveArgs(session, args ?? [])
+          } catch (e) {
+            return ctx.$.handleResolveArgsError(session, e)
+          }
+          const { imageInfos, texts } = resolvedArgs
+          if (config.debug) {
+            logger.info('[DEBUG] Resolved args: texts=%o, imageInfos=%d', texts, imageInfos.length)
+          }
+
+          // 处理参数补全
+          const { min_images, max_images, min_texts, max_texts, default_texts } = info.params_type
+          const autoUseAvatar = !!(
+            (config.autoUseSenderAvatarWhenOnlyOne && !imageInfos.length && min_images === 1) ||
+            (config.autoUseSenderAvatarWhenOneLeft && imageInfos.length && imageInfos.length + 1 === min_images)
+          )
+          if (autoUseAvatar) imageInfos.unshift({ userId: session.userId })
+          if (!texts.length && config.autoUseDefaultTexts) texts.push(...default_texts)
+
+          // 用户屏蔽检查
+          if (guildId !== 'private') {
+            for (const item of imageInfos) {
+              if ('userId' in item && item.userId) {
+                if (item.userId === session.userId) continue
+                const isBlocked = await ctx.$.isUserMemeBlocked(guildId, platform, item.userId, info.key)
+                if (isBlocked) {
+                  if (config.debug) logger.info('[DEBUG] User %s is blocked for meme: %s', item.userId, info.key)
+                  return
+                }
               }
             }
           }
-        }
-        // ========================================================
+          if (config.debug) logger.info('[DEBUG] User block check passed')
 
-        if (!checkInRange(imageInfos.length, min_images, max_images)) {
-          return config.silentShortcut && session.inShortcut
-            ? undefined
-            : session.text('memes-api.errors.image-number-mismatch', [
+          if (!checkInRange(imageInfos.length, min_images, max_images)) {
+            return config.silentShortcut && session.inShortcut
+              ? undefined
+              : session.text('memes-api.errors.image-number-mismatch', [
                 formatRange(min_images, max_images),
                 imageInfos.length,
               ])
-        }
-        if (!checkInRange(texts.length, min_texts, max_texts)) {
-          return config.silentShortcut && session.inShortcut
-            ? undefined
-            : session.text('memes-api.errors.text-number-mismatch', [
+          }
+          if (!checkInRange(texts.length, min_texts, max_texts)) {
+            return config.silentShortcut && session.inShortcut
+              ? undefined
+              : session.text('memes-api.errors.text-number-mismatch', [
                 formatRange(min_texts, max_texts),
                 texts.length,
               ])
+          }
+
+          let imagesAndInfos: ImagesAndInfos
+          try {
+            imagesAndInfos = await ctx.$.resolveImagesAndInfos(session, imageInfos)
+          } catch (e) {
+            return ctx.$.handleResolveImagesAndInfosError(session, e)
+          }
+          const { images, userInfos } = imagesAndInfos
+
+          if (config.debug) logger.info('[DEBUG] Starting render...')
+
+          let img: Blob
+          try {
+            img = await ctx.$.api.renderMeme(info.key, {
+              images,
+              texts,
+              args: { ...(options ?? {}), user_infos: userInfos },
+            })
+          } catch (e) {
+            return ctx.$.handleRenderError(session, e)
+          }
+
+          ctx.$.recordMemeUsage(session, info.key).catch(() => { })
+          return h.image(await img.arrayBuffer(), img.type)
+
+        } catch (error: any) {
+          logger.warn(`Action error: ${error.message}`)
         }
+      })
 
-        let imagesAndInfos: ImagesAndInfos
-        try {
-          imagesAndInfos = await ctx.$.resolveImagesAndInfos(session, imageInfos)
-        } catch (e) {
-          return ctx.$.handleResolveImagesAndInfosError(session, e)
-        }
-        const { images, userInfos } = imagesAndInfos
-
-        let img: Blob
-        try {
-          img = await ctx.$.api.renderMeme(key, {
-            images,
-            texts,
-            args: { ...(options ?? {}), user_infos: userInfos },
-          })
-        } catch (e) {
-          return ctx.$.handleRenderError(session, e)
-        }
-
-        ctx.$.recordMemeUsage(session, info.key).catch(() => {})
-        return h.image(await img.arrayBuffer(), img.type)
-
-      } catch (error: any) {
-        logger.warn(`Action error: ${error.message}`)
-      }
-    })
-  }
-
-  ctx.$.reRegisterGenerateCommands = async () => {
-    for (const cmd of generateSubCommands) { try { (cmd as any).dispose() } catch (_) {} }
-    generateSubCommands.length = 0
-    const registeredNames = new Set<string>()
-    logger.info(`Starting to register ${Object.keys(ctx.$.infos).length} memes...`)
-
-    for (const info of Object.values(ctx.$.infos)) {
-        const cmd = registerGenerateCmd(info, registeredNames)
-        if (cmd) generateSubCommands.push(cmd)
+      // 保存引用以便清理
+      generateSubCommands.push(subCmd)
     }
     logger.info(`Successfully registered ${generateSubCommands.length} commands.`)
   }
