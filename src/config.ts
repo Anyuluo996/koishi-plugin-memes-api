@@ -84,7 +84,14 @@ export const GenerateCommandConfigSchema = Schema.intersect([
 ])
 
 export const ListConfigSchema = Schema.object({
-  listSortBy: Schema.union(Object.values(ListSortBy)).default(ListSortBy.default)
+  listSortBy: Schema.union([
+    Schema.const(ListSortBy.default).description('默认顺序'),
+    Schema.const(ListSortBy.type).description('按类型（图片表情优先）'),
+    Schema.const(ListSortBy.key).description('按表情 key 排序'),
+    Schema.const(ListSortBy.keywords).description('按关键词排序'),
+    Schema.const(ListSortBy.dateCreated).description('按创建日期排序'),
+    Schema.const(ListSortBy.dateModified).description('按修改日期排序'),
+  ]).default(ListSortBy.default)
     .description('表情排序方式'),
   listSortReverse: Schema.boolean().default(false).description('是否倒序排列'),
   listNewTimeDelta: Schema.natural().min(1).default(30).description('新表情标识的时间间隔(天)'),
