@@ -1,4 +1,9 @@
-import type { FileResponse } from '@cordisjs/plugin-http'
+// FileResponse type from @cordisjs/plugin-http
+interface FileResponse {
+  data: Uint8Array
+  headers: Record<string, string>
+  status: number
+}
 
 export class ArgSyntaxError extends SyntaxError {
   constructor(
@@ -122,7 +127,7 @@ export function escapeArgs(args: string[], extraShouldQuote?: string[]): string 
         return false
       })()
       if (!needQuote) return arg
-      for (const q of quotes) arg.replaceAll(q, `\\${q}`)
+      for (const q of quotes) arg = arg.replaceAll(q, `\\${q}`)
       return `"${arg}"`
     })
     .join(' ')

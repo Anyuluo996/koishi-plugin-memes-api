@@ -67,8 +67,7 @@ declare module 'koishi' {
 const logger = new Logger('memes-api')
 
 export async function apply(ctx: Context, config: Config) {
-  ; (ctx as any).i18n.define('zh-CN', zhCNLocale)
-    ; (ctx as any).i18n.define('zh', zhCNLocale)
+  ; (ctx as any).i18n.define('zh', zhCNLocale)
 
   ctx = ctx.isolate('$')
   ctx.set('$', {})
@@ -195,29 +194,33 @@ export async function apply(ctx: Context, config: Config) {
   }
 
   ctx.$.recordMemeUsage = async (session: any, memeKey: string) => {
-    const guildId = session.guildId || 'private'
-    const userId = session.userId
-    const platform = session.platform
-    const existing = await (ctx as any).database.get('memes_usage_stats', {
-      meme_key: memeKey,
-      guild_id: guildId,
-      user_id: userId,
-      platform: platform
-    })
-    if (existing.length > 0) {
-      await (ctx as any).database.set('memes_usage_stats', existing[0].id, {
-        usage_count: existing[0].usage_count + 1,
-        last_used: new Date()
-      })
-    } else {
-      await (ctx as any).database.create('memes_usage_stats', {
+    try {
+      const guildId = session.guildId || 'private'
+      const userId = session.userId
+      const platform = session.platform
+      const existing = await (ctx as any).database.get('memes_usage_stats', {
         meme_key: memeKey,
         guild_id: guildId,
         user_id: userId,
-        platform: platform,
-        usage_count: 1,
-        last_used: new Date()
+        platform: platform
       })
+      if (existing.length > 0) {
+        await (ctx as any).database.set('memes_usage_stats', existing[0].id, {
+          usage_count: existing[0].usage_count + 1,
+          last_used: new Date()
+        })
+      } else {
+        await (ctx as any).database.create('memes_usage_stats', {
+          meme_key: memeKey,
+          guild_id: guildId,
+          user_id: userId,
+          platform: platform,
+          usage_count: 1,
+          last_used: new Date()
+        })
+      }
+    } catch (error) {
+      logger.warn('Failed to record meme usage:', error)
     }
   }
 

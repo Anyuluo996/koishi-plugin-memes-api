@@ -12,8 +12,7 @@
   "author": "anyul <1247572395@qq.com>",
   "homepage": "https://github.com/Anyuluo996/koishi-plugin-memes-api",
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
-    "build:console": "koishi-console build"
+    "build": "tsc -p tsconfig.build.json"
   },
   "keywords": [
     "chatbot",
@@ -49,11 +48,15 @@
   },
   "peerDependencies": {
     "@cordisjs/element": "^0.1.0",
-    "koishi": "^4.18.7"
+    "@cordisjs/plugin-http": "~0.4.2",
+    "koishi": "^4.18.10"
   },
   "devDependencies": {
-    "@koishijs/plugin-help": "^2.4.5",
+    "@koishijs/plugin-help": "^2.4.6",
     "@koishijs/plugin-notifier": "^1.2.1",
+    "@koishijs/scripts": "3.0.0",
+    "esbuild": "0.27.2",
+    "koishi": "^4.18.10",
     "koishi-plugin-adapter-onebot": "^6.8.0"
   },
   "dependencies": {
