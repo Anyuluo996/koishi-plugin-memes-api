@@ -321,7 +321,7 @@ export async function apply(ctx: Context, config: Config) {
 
         try {
           const guildId = getGuildId(session)
-          const platform = (session as any).platform
+          const platform = session.platform
 
           if (config.debug) {
             logger.info('[DEBUG] Triggered meme: %s, user: %s, guild: %s', info.key, session.userId, guildId)

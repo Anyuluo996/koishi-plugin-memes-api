@@ -1,6 +1,6 @@
 import { Context, Logger } from 'koishi'
 import { Config } from '../config'
-import { getGuildId } from '../types/internal'
+import { getGuildId, getGuildDisplay } from '../types/internal'
 
 const logger = new Logger('memes-stats')
 

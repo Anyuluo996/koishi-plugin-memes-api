@@ -24,7 +24,7 @@ export async function apply(ctx: Context, config: Config) {
       return
     }
 
-    const platform = (session as any).platform
+    const platform = session.platform
     const inputTrimmed = memeInput.trim()
 
     // 通过关键词查找表情包标识符
@@ -81,7 +81,7 @@ export async function apply(ctx: Context, config: Config) {
       return
     }
 
-    const platform = (session as any).platform
+    const platform = session.platform
     const inputTrimmed = memeInput.trim()
 
     const memeKey = ctx.$.findMemeKeyByKeyword(inputTrimmed)
@@ -124,7 +124,7 @@ export async function apply(ctx: Context, config: Config) {
     }
 
     try {
-      const settings = await ctx.$.getGuildMemeSettings(targetGuildId, (session as any).platform)
+      const settings = await ctx.$.getGuildMemeSettings(targetGuildId, session.platform)
 
       if (settings.length === 0) {
         const guildDisplay = guildId ? `群组 ${targetGuildId}` : '当前群组'
