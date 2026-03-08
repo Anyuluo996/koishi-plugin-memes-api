@@ -56,8 +56,7 @@
     "@koishijs/plugin-notifier": "^1.2.1",
     "@koishijs/scripts": "3.0.0",
     "esbuild": "0.27.2",
-    "koishi": "^4.18.10",
-    "koishi-plugin-adapter-onebot": "^6.8.0"
+    "koishi": "^4.18.10"
   },
   "dependencies": {
     "meme-generator-api": "^0.1.0",
