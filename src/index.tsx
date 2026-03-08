@@ -138,26 +138,40 @@ export async function apply(ctx: Context, config: Config) {
         })
       }),
     )
-    for (const k in ctx.$.infos) delete ctx.$.infos[k]
-    Object.assign(ctx.$.infos, Object.fromEntries(newEntries))
+    
+    ctx.$.infos = Object.fromEntries(newEntries)
+  }
+
+  // findMeme 查询缓存
+  let findMemeCache: Map<string, MemeInfoResponse> | null = null
+
+  const buildFindMemeCache = () => {
+    const cache = new Map<string, MemeInfoResponse>()
+    // 主 key
+    for (const [key, info] of Object.entries(ctx.$.infos)) {
+      cache.set(key.toLowerCase(), info)
+      // 关键词
+      for (const keyword of info.keywords) {
+        cache.set(keyword.toLowerCase(), info)
+      }
+      // 标签
+      for (const tag of info.tags) {
+        cache.set(tag.toLowerCase(), info)
+      }
+      // 快捷键
+      for (const { key, humanized } of info.shortcuts) {
+        cache.set(key.toLowerCase(), info)
+        if (humanized) cache.set(humanized.toLowerCase(), info)
+      }
+    }
+    return cache
   }
 
   ctx.$.findMeme = (query) => {
-    query = query.trim()
-    if (query in ctx.$.infos) return ctx.$.infos[query]
-    query = query.toLowerCase()
-    for (const info of Object.values(ctx.$.infos)) {
-      for (const keyword of info.keywords) {
-        if (keyword.toLowerCase() === query) return info
-      }
-      for (const tag of info.tags) {
-        if (tag.toLowerCase() === query) return info
-      }
-      for (const { key, humanized } of info.shortcuts) {
-        const ok = humanized ? humanized.toLowerCase() === query : key.toLowerCase() === query
-        if (ok) return info
-      }
-    }
+    query = query.trim().toLowerCase()
+    // 使用缓存查找
+    if (!findMemeCache) findMemeCache = buildFindMemeCache()
+    return findMemeCache.get(query)
   }
 
   // === 数据库操作函数 ===
@@ -186,17 +200,20 @@ export async function apply(ctx: Context, config: Config) {
   }
 
   ctx.$.isMemeBlacklisted = async (memeKey: string, keywords: string[]) => {
-    const blacklistRaw = await ctx.$.getBlacklistedKeywords()
-    const blacklist = new Set(blacklistRaw.map(k => k.toLowerCase()))
+    // 直接使用已缓存的 blacklistSet，避免每次创建新 Set
+    if (!blacklistCache) {
+      const blacklistRaw = await ctx.$.getBlacklistedKeywords()
+      blacklistCache = new Set(blacklistRaw.map(k => k.toLowerCase()))
+    }
 
     if (config.debug) {
       logger.info(`[DEBUG] Checking blacklist for key: ${memeKey}, keywords: ${keywords.join(', ')}`)
-      logger.info(`[DEBUG] Current blacklist: ${Array.from(blacklist).join(', ')}`)
+      logger.info(`[DEBUG] Current blacklist: ${Array.from(blacklistCache).join(', ')}`)
     }
 
-    if (blacklist.has(memeKey.toLowerCase())) return true
+    if (blacklistCache.has(memeKey.toLowerCase())) return true
     for (const kw of keywords) {
-      if (blacklist.has(kw.toLowerCase())) return true
+      if (blacklistCache.has(kw.toLowerCase())) return true
     }
     return false
   }

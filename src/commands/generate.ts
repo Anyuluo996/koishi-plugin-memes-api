@@ -2,6 +2,7 @@ import { Command, Context, h, paramCase, Session, Logger } from 'koishi'
 
 // 适配 Element 类型
 type Element = any
+import pLimit from 'p-limit'
 
 import {
   ActType,
@@ -171,22 +172,37 @@ export async function apply(ctx: Context, config: Config) {
   }
 
   ctx.$.resolveImagesAndInfos = async (session, imageInfos) => {
-    const imageInfoKeys = imageInfos.map((v) => JSON.stringify(v))
+    // 使用 Map 去重，避免重复的 JSON 序列化和 indexOf 查找
+    const imageInfoMap = new Map<string, ImageFetchInfo>()
+    for (const info of imageInfos) {
+      const key = JSON.stringify(info)
+      if (!imageInfoMap.has(key)) imageInfoMap.set(key, info)
+    }
+
     const imageMap: Record<string, Blob> = {}
     const userInfoMap: Record<string, UserInfo> = {}
-    const tasks = [...new Set(imageInfoKeys)].map(async (key) => {
-      const index = imageInfoKeys.indexOf(key)
-      const info = imageInfos[index]
-      let url: string
-      let userInfo: UserInfo
-      if ('src' in info) { url = info.src; userInfo = {} }
-      else if ('userId' in info) { ({ url, userInfo } = await ctx.$.getInfoFromID(session, info.userId)) }
-      else throw new Error('Invalid image info')
-      imageMap[key] = constructBlobFromFileResp(await ctx.http.file(url))
-      userInfoMap[key] = userInfo
-    })
+    const limit = pLimit(3) // 限制并发下载数量
+    const tasks = Array.from(imageInfoMap.entries()).map(([key, info]) =>
+      limit(async () => {
+        let url: string
+        let userInfo: UserInfo
+        if ('src' in info) { url = info.src; userInfo = {} }
+        else if ('userId' in info) { ({ url, userInfo } = await ctx.$.getInfoFromID(session, info.userId)) }
+        else throw new Error('Invalid image info')
+        imageMap[key] = constructBlobFromFileResp(await ctx.http.file(url))
+        userInfoMap[key] = userInfo
+      })
+    )
     await Promise.all(tasks)
-    return { images: imageInfoKeys.map(k => imageMap[k]), userInfos: imageInfoKeys.map(k => userInfoMap[k]) }
+    // 保持原顺序返回
+    const resultImages: Blob[] = []
+    const resultUserInfos: UserInfo[] = []
+    for (const info of imageInfos) {
+      const key = JSON.stringify(info)
+      resultImages.push(imageMap[key])
+      resultUserInfos.push(userInfoMap[key])
+    }
+    return { images: resultImages, userInfos: resultUserInfos }
   }
 
   // Error Handlers
