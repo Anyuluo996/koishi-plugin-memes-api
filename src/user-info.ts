@@ -35,20 +35,20 @@ export async function apply(ctx: Context, config: Config) {
     const platformSpecific: Record<string, () => Promise<ImageAndUserInfo>> = {
       onebot: async () => {
         const url = `http://q.qlogo.cn/headimg_dl?dst_uin=${userId}&spec=640`
-        const bot = session.bot as any as OneBotBot<Context>
+        const bot = session.bot as unknown as OneBotBot<Context>
 
         if (session.isDirect) {
           const data = await bot.internal.getStrangerInfo(userId)
           return {
             url,
-            userInfo: { name: data.nickname, gender: data.sex || 'unknown' },
+            userInfo: { name: data.nickname, gender: (data.sex || 'unknown') as UserInfo['gender'] },
           }
         }
 
         const data = await bot.internal.getGroupMemberInfo(session.guildId, userId)
         return {
           url,
-          userInfo: { name: data.card || data.nickname, gender: data.sex || 'unknown' },
+          userInfo: { name: data.card || data.nickname, gender: (data.sex || 'unknown') as UserInfo['gender'] },
         }
       },
     }
@@ -59,7 +59,7 @@ export async function apply(ctx: Context, config: Config) {
           url: session.event.user.avatar,
           userInfo: {
             name: session.username || session.userId || '',
-            gender: 'unknown',
+            gender: 'unknown' as UserInfo['gender'],
           },
         }
       } else if (session.bot.getUser) {
@@ -67,7 +67,7 @@ export async function apply(ctx: Context, config: Config) {
         if (user.avatar) {
           return {
             url: user.avatar,
-            userInfo: { name: user.nick || user.name || '', gender: 'unknown' },
+            userInfo: { name: user.nick || user.name || '', gender: 'unknown' as UserInfo['gender'] },
           }
         }
       }

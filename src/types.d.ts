@@ -1,5 +1,23 @@
 // 扩展 Koishi 类型定义以解决编译错误
 
+declare module 'koishi-plugin-adapter-onebot' {
+  import { Context } from 'koishi'
+
+  export interface OneBotBot<C extends Context = Context> {
+    internal: {
+      getStrangerInfo(userId: string): Promise<{
+        nickname: string
+        sex: string
+      }>
+      getGroupMemberInfo(groupId: string, userId: string): Promise<{
+        nickname: string
+        card: string
+        sex: string
+      }>
+    }
+  }
+}
+
 declare module 'koishi' {
   interface Context {
     logger: any
@@ -65,6 +83,14 @@ declare module 'koishi' {
       platform: string
       meme_key: string
       enabled: boolean
+    }
+    memes_user_blocks: {
+      id: number
+      guild_id: string
+      platform: string
+      user_id: string
+      meme_key: string
+      blocked: boolean
     }
   }
 }
