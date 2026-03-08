@@ -261,7 +261,7 @@ export async function apply(ctx: Context, config: Config) {
           const index = conflictingInfos.indexOf(info)
           const resolvedKeyword = `${keyword}${index + 1}`
           resolvedKws.push(resolvedKeyword)
-          logger.info(`关键词冲突: "${keyword}" 被以下表情使用: ${conflictingInfos.map((i: any) => i.key).join(', ')}, 已自动添加数字后缀`)
+          logger.info(`关键词冲突: "${keyword}" 被以下表情使用: ${conflictingInfos.map((i: MemeInfoResponse) => i.key).join(', ')}, 已自动添加数字后缀`)
         }
       }
       resolvedKeywordsMap.set(info.key, resolvedKws)
@@ -315,7 +315,7 @@ export async function apply(ctx: Context, config: Config) {
       registerGenerateOptions(subCmd, info)
 
       // 动作定义
-      subCmd.action(async ({ session, options }: any, args: any) => {
+      subCmd.action(async ({ session, options }: { session: Session, options?: Record<string, unknown> }, args: unknown[]) => {
         if (!session) return
 
         try {
@@ -429,8 +429,8 @@ export async function apply(ctx: Context, config: Config) {
           ctx.$.recordMemeUsage(session, info.key).catch(() => { })
           return h.image(await img.arrayBuffer(), img.type)
 
-        } catch (error: any) {
-          logger.warn(`Action error: ${error.message}`)
+        } catch (error: unknown) {
+          logger.warn(`Action error: ${error instanceof Error ? error.message : String(error)}`)
         }
       })
 

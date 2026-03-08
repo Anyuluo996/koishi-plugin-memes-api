@@ -1,10 +1,11 @@
-import { Context, Logger, h } from 'koishi'
+import { Context, Logger, h, Session } from 'koishi'
 import { MemeAPI, MemeInfoResponse } from 'meme-generator-api'
 import pLimit from 'p-limit'
 
 import * as Commands from './commands'
 import { Config } from './config'
 import zhCNLocale from './locales/zh-CN'
+import type { HttpConfig, MemeUsageRecord, GuildSettingRecord, UserBlockRecord } from './types/internal'
 import * as UserInfo from './user-info'
 
 import type { } from '@koishijs/plugin-help'
@@ -35,7 +36,7 @@ export interface MemeInternal {
   removeBlacklistedKeyword(keyword: string): Promise<boolean>
   isMemeBlacklisted(memeKey: string, keywords: string[]): Promise<boolean>
 
-  recordMemeUsage(session: any, memeKey: string): Promise<void>
+  recordMemeUsage(session: Session, memeKey: string): Promise<void>
   getMemeUsageStats(memeKey: string, guildId?: string | null, limit?: number): Promise<any[]>
   getTopMemes(guildId?: string | null, limit?: number): Promise<any[]>
   findMemeKeyByKeyword(keyword: string): string | null
@@ -80,7 +81,7 @@ export async function apply(ctx: Context, config: Config) {
     ; (ctx as any).model.extend('memes_blacklist', {
       id: 'unsigned',
       keyword: 'string',
-    }, { primary: 'id', autoInc: true })
+    }, { primary: 'id', autoInc: true, indexes: [{ columns: ['keyword'], unique: true }] })
 
     ; (ctx as any).model.extend('memes_usage_stats', {
       id: 'unsigned',
@@ -90,7 +91,7 @@ export async function apply(ctx: Context, config: Config) {
       platform: 'string',
       usage_count: 'unsigned',
       last_used: 'timestamp',
-    }, { primary: 'id', autoInc: true })
+    }, { primary: 'id', autoInc: true, indexes: [{ columns: ['meme_key', 'guild_id', 'user_id', 'platform'] }] })
 
     ; (ctx as any).model.extend('memes_guild_settings', {
       id: 'unsigned',
@@ -98,7 +99,7 @@ export async function apply(ctx: Context, config: Config) {
       platform: 'string',
       meme_key: 'string',
       enabled: 'boolean',
-    }, { primary: 'id', autoInc: true })
+    }, { primary: 'id', autoInc: true, indexes: [{ columns: ['guild_id', 'platform', 'meme_key'] }] })
 
     ; (ctx as any).model.extend('memes_user_blocks', {
       id: 'unsigned',
@@ -107,10 +108,10 @@ export async function apply(ctx: Context, config: Config) {
       user_id: 'string',
       meme_key: 'string',
       blocked: 'boolean',
-    }, { primary: 'id', autoInc: true })
+    }, { primary: 'id', autoInc: true, indexes: [{ columns: ['guild_id', 'platform', 'user_id', 'meme_key'] }] })
 
   // === API 初始化 ===
-  let httpConfig: any
+  let httpConfig: HttpConfig
   if (config.requestConfig && typeof config.requestConfig === 'object') {
     const { endpoint, ...rest } = config.requestConfig
     httpConfig = { baseURL: endpoint, ...rest }
@@ -193,7 +194,7 @@ export async function apply(ctx: Context, config: Config) {
     return false
   }
 
-  ctx.$.recordMemeUsage = async (session: any, memeKey: string) => {
+  ctx.$.recordMemeUsage = async (session: Session, memeKey: string) => {
     try {
       const guildId = session.guildId || 'private'
       const userId = session.userId

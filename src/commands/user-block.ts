@@ -49,9 +49,9 @@ export async function apply(ctx: Context, config: Config) {
     try {
       await ctx.$.setUserMemeBlocked(session.guildId, session.platform, userId, memeKey, true)
       await session.send(`✅ 已屏蔽用户 ${userId} 出演表情包 "${displayName}" (${memeKey})！`)
-    } catch (error: any) {
+    } catch (error: unknown) {
       logger.warn('屏蔽用户表情包失败', error)
-      await session.send(`❌ 屏蔽失败: ${error.message}`)
+      await session.send(`❌ 屏蔽失败: ${(error instanceof Error ? error.message : String(error))}`)
     }
   })
 
@@ -80,9 +80,9 @@ export async function apply(ctx: Context, config: Config) {
     try {
       await ctx.$.setUserMemeBlocked(session.guildId, session.platform, userId, memeKey, false)
       await session.send(`✅ 已恢复用户 ${userId} 出演表情包 "${displayName}" (${memeKey})！`)
-    } catch (error: any) {
+    } catch (error: unknown) {
       logger.warn('取消屏蔽用户表情包失败', error)
-      await session.send(`❌ 取消失败: ${error.message}`)
+      await session.send(`❌ 取消失败: ${(error instanceof Error ? error.message : String(error))}`)
     }
   })
 
@@ -169,9 +169,9 @@ export async function apply(ctx: Context, config: Config) {
       
       await session.send(outputLines.join('\n'))
 
-    } catch (error: any) {
+    } catch (error: unknown) {
       logger.warn('获取设置失败', error)
-      await session.send(`❌ 获取设置失败: ${error.message}`)
+      await session.send(`❌ 获取设置失败: ${(error instanceof Error ? error.message : String(error))}`)
     }
   })
 }
