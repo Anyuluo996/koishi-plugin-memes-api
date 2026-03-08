@@ -14,6 +14,7 @@ import {
 
 import { Config } from '../config'
 import { GetAvatarFailedError } from '../user-info'
+import { getGuildId } from '../types/internal'
 import {
   ArgSyntaxError,
   checkInRange,
@@ -319,7 +320,7 @@ export async function apply(ctx: Context, config: Config) {
         if (!session) return
 
         try {
-          const guildId = (session as any).guildId || 'private'
+          const guildId = getGuildId(session)
           const platform = (session as any).platform
 
           if (config.debug) {

@@ -161,21 +161,28 @@ export async function apply(ctx: Context, config: Config) {
   }
 
   // === 数据库操作函数 ===
+ // 黑名单缓存
+  let blacklistCache: Set<string> | null = null
   ctx.$.getBlacklistedKeywords = async () => {
+    if (blacklistCache) return Array.from(blacklistCache)
     const records = await (ctx as any).database.get('memes_blacklist', {})
-    return records.map((record: any) => record.keyword)
+    const keywords = records.map((record: any) => record.keyword)
+    blacklistCache = new Set(keywords.map(k => k.toLowerCase()))
+    return keywords
   }
 
   ctx.$.addBlacklistedKeyword = async (keyword: string) => {
     const existing = await (ctx as any).database.get('memes_blacklist', { keyword })
     if (existing.length > 0) return false
     await (ctx as any).database.create('memes_blacklist', { keyword })
+    blacklistCache = null  // 清除缓存
     return true
   }
 
   ctx.$.removeBlacklistedKeyword = async (keyword: string) => {
     const result = await (ctx as any).database.remove('memes_blacklist', { keyword })
     return result.matched > 0
+    blacklistCache = null  // 清除缓存
   }
 
   ctx.$.isMemeBlacklisted = async (memeKey: string, keywords: string[]) => {

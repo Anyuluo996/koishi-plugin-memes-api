@@ -1,5 +1,6 @@
 import { Context, Logger } from 'koishi'
 import { Config } from '../config'
+import { getGuildId } from '../types/internal'
 
 const logger = new Logger('memes-stats')
 
@@ -23,7 +24,7 @@ export async function apply(ctx: Context, config: Config) {
           return
         }
 
-        const guildId = (session as any).guildId || 'private'
+        const guildId = getGuildId(session)
         const stats = await ctx.$.getMemeUsageStats(memeKey, guildId, 10)
 
         if (stats.length === 0) {
@@ -39,7 +40,7 @@ export async function apply(ctx: Context, config: Config) {
         await session.send(`📊 表情包 "${memeKey}" 在当前${(session as any).guildId ? '群组' : '私聊'}的使用统计:\n总使用次数: ${totalUsage}\n\n用户排行:\n${statsText}`)
       } else {
         // 查看热门表情包排行
-        const guildId = (session as any).guildId || 'private'
+        const guildId = getGuildId(session)
         const topMemes = await ctx.$.getTopMemes(guildId, 10)
 
         if (topMemes.length === 0) {

@@ -1,5 +1,6 @@
 import { Context, Logger } from 'koishi'
 import { Config } from '../config'
+import { getGuildId } from '../types/internal'
 
 const logger = new Logger('memes-guild')
 
@@ -17,7 +18,7 @@ export async function apply(ctx: Context, config: Config) {
   enableGuildCmd.action(async ({ session }, memeInput, guildId) => {
     if (!session) return
 
-    const targetGuildId = guildId || (session as any).guildId
+    const targetGuildId = session.guildId ?? guildId
     if (!targetGuildId) {
       await session.send('❌ 请在群组中使用此命令或指定群组ID！')
       return
@@ -74,7 +75,7 @@ export async function apply(ctx: Context, config: Config) {
   disableGuildCmd.action(async ({ session }, memeInput, guildId) => {
     if (!session) return
 
-    const targetGuildId = guildId || (session as any).guildId
+    const targetGuildId = session.guildId ?? guildId
     if (!targetGuildId) {
       await session.send('❌ 请在群组中使用此命令或指定群组ID！')
       return
@@ -116,7 +117,7 @@ export async function apply(ctx: Context, config: Config) {
   guildListCmd.action(async ({ session }, guildId) => {
     if (!session) return
 
-    const targetGuildId = guildId || (session as any).guildId
+    const targetGuildId = session.guildId ?? guildId
     if (!targetGuildId) {
       await session.send('❌ 请在群组中使用此命令或指定群组ID！')
       return
