@@ -15,6 +15,11 @@ declare module 'koishi-plugin-adapter-onebot' {
         sex: string
       }>
     }
+    getUser(userId: string, guildId?: string): Promise<{
+      nick?: string
+      name?: string
+      avatar?: string
+    }>
   }
 }
 
