@@ -3,6 +3,7 @@ import { Context, h, Random } from 'koishi'
 import { Config } from '../config'
 import { checkInRange, formatKeywords } from '../utils'
 import { ImagesAndInfos, ResolvedArgs } from './generate'
+import { getGuildId } from '../types/internal'
 
 export async function apply(ctx: Context, config: Config) {
   const subCmd = ctx.$.cmd.subcommand('.random [args:el]')
@@ -31,20 +32,26 @@ export async function apply(ctx: Context, config: Config) {
     const autoUse = !imageInfos.length && !texts.length
     if (autoUse) imageInfos.push({ userId: session.userId })
 
-    const suitableMemes = Object.values(ctx.$.infos).filter((info) => {
-      const {
-        params_type: {
-          min_images: minImages,
-          max_images: maxImages,
-          min_texts: minTexts,
-          max_texts: maxTexts,
-        },
-      } = info
-      return (
-        checkInRange(imageInfos.length, minImages, maxImages) &&
-        (autoUse || checkInRange(texts.length, minTexts, maxTexts))
-      )
+    const guildId = getGuildId(session)
+    const platform = session.platform
+
+    // 第一步：按图片/文字数量过滤（同步）
+    const rangeFiltered = Object.values(ctx.$.infos).filter((info) => {
+      const { min_images, max_images, min_texts, max_texts } = info.params_type
+      if (!checkInRange(imageInfos.length, min_images, max_images)) return false
+      if (!autoUse && !checkInRange(texts.length, min_texts, max_texts)) return false
+      return true
     })
+
+    // 第二步：异步检查黑名单和群组禁用
+    const suitableMemes: typeof rangeFiltered = []
+    for (const info of rangeFiltered) {
+      if (await ctx.$.isMemeBlacklisted(info.key, info.keywords)) continue
+      if (guildId !== 'private') {
+        if (!await ctx.$.isMemeGuildEnabled(guildId, platform, info.key)) continue
+      }
+      suitableMemes.push(info)
+    }
 
     if (!suitableMemes.length) {
       return session.text('memes-api.random.no-suitable-meme')
@@ -56,12 +63,26 @@ export async function apply(ctx: Context, config: Config) {
     } catch (e) {
       return ctx.$.handleResolveImagesAndInfosError(session, e)
     }
-    const { images, userInfos } = imagesAndInfos
+    const { images, userInfos, imageInfos: resolvedImageInfos } = imagesAndInfos
 
     while (suitableMemes.length) {
       const index = Random.int(0, suitableMemes.length)
       const info = suitableMemes[index]
       suitableMemes.splice(index, 1)
+
+      // 用户屏蔽检查（使用原始 imageInfos 获取 userId）
+      if (guildId !== 'private') {
+        let blocked = false
+        for (let i = 0; i < resolvedImageInfos.length; i++) {
+          const item = resolvedImageInfos[i]
+          if (!('userId' in item) || item.userId === session.userId) continue
+          if (await ctx.$.isUserMemeBlocked(guildId, platform, item.userId, info.key)) {
+            blocked = true
+            break
+          }
+        }
+        if (blocked) continue
+      }
 
       let img: Blob
       try {

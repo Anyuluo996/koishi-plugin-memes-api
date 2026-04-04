@@ -46,6 +46,7 @@ export interface ResolvedArgs {
 export interface ImagesAndInfos {
   images: Blob[]
   userInfos: UserInfo[]
+  imageInfos: any[]
 }
 
 declare module '../index' {
@@ -202,7 +203,7 @@ export async function apply(ctx: Context, config: Config) {
       resultImages.push(imageMap[key])
       resultUserInfos.push(userInfoMap[key])
     }
-    return { images: resultImages, userInfos: resultUserInfos }
+    return { images: resultImages, userInfos: resultUserInfos, imageInfos }
   }
 
   // Error Handlers

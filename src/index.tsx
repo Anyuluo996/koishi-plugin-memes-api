@@ -53,6 +53,8 @@ export interface MemeInternal {
 
   reRegisterGenerateCommands(): Promise<void>
   refreshShortcuts(): Promise<void>
+  invalidateFindMemeCache(): void
+  invalidateAllCaches(): void
 }
 export interface MemePublic {
   api: MemeAPI
@@ -140,6 +142,8 @@ export async function apply(ctx: Context, config: Config) {
     )
     
     ctx.$.infos = Object.fromEntries(newEntries)
+    // 更新后清除 findMeme 查询缓存
+    findMemeCache = null
   }
 
   // findMeme 查询缓存
@@ -174,6 +178,16 @@ export async function apply(ctx: Context, config: Config) {
     return findMemeCache.get(query)
   }
 
+  // 缓存失效函数，供其他模块调用
+  ctx.$.invalidateFindMemeCache = () => {
+    findMemeCache = null
+  }
+
+  ctx.$.invalidateAllCaches = () => {
+    findMemeCache = null
+    blacklistCache = null
+  }
+
   // === 数据库操作函数 ===
  // 黑名单缓存
   let blacklistCache: Set<string> | null = null
@@ -195,8 +209,8 @@ export async function apply(ctx: Context, config: Config) {
 
   ctx.$.removeBlacklistedKeyword = async (keyword: string) => {
     const result = await (ctx as any).database.remove('memes_blacklist', { keyword })
+    blacklistCache = null  // 清除缓存（必须在 return 之前）
     return result.matched > 0
-    blacklistCache = null  // 清除缓存
   }
 
   ctx.$.isMemeBlacklisted = async (memeKey: string, keywords: string[]) => {

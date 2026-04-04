@@ -5,7 +5,7 @@ const logger = new Logger('memes-refresh')
 
 export async function apply(ctx: Context, config: Config) {
   // 手动刷新命令
-  const refreshCmd = ctx.$.cmd.subcommand('.refresh', '手动重新获取表情包信息并更新命令', { checkArgCount: true })
+  const refreshCmd = ctx.$.cmd.subcommand('.refresh', '手动重新获取表情包信息并更新命令', { checkArgCount: true, authority: 1 })
   if (config.enableShortcut) {
     refreshCmd.alias('获取表情')
     refreshCmd.alias('meme获取表情')
@@ -17,6 +17,9 @@ export async function apply(ctx: Context, config: Config) {
     if (!session) return
 
     try {
+      // 清除所有缓存
+      ctx.$.invalidateAllCaches()
+
       // 使用现有的 updateInfos 函数重新获取表情信息
       await ctx.$.updateInfos()
 

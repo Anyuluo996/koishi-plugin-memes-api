@@ -19,6 +19,7 @@ export async function apply(ctx: Context, config: Config) {
     const success = await ctx.$.addBlacklistedKeyword(keyword)
 
     // 刷新逻辑
+    ctx.$.invalidateAllCaches()
     try {
       // 1. 重新注册命令（这会处理 .alias 的移除）
       await ctx.$.reRegisterGenerateCommands()
