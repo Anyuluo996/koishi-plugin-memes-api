@@ -81,7 +81,7 @@ export async function apply(ctx: Context, config: Config) {
     ; (ctx as any).model.extend('memes_blacklist', {
       id: 'unsigned',
       keyword: 'string',
-    }, { primary: 'id', autoInc: true, indexes: [{ columns: ['keyword'], unique: true }] })
+    }, { primary: 'id', autoInc: true, indexes: [{ keys: { keyword: 'asc' }, unique: true }] })
 
     ; (ctx as any).model.extend('memes_usage_stats', {
       id: 'unsigned',
@@ -91,7 +91,7 @@ export async function apply(ctx: Context, config: Config) {
       platform: 'string',
       usage_count: 'unsigned',
       last_used: 'timestamp',
-    }, { primary: 'id', autoInc: true, indexes: [{ columns: ['meme_key', 'guild_id', 'user_id', 'platform'] }] })
+    }, { primary: 'id', autoInc: true, indexes: [['meme_key', 'guild_id', 'user_id', 'platform']] })
 
     ; (ctx as any).model.extend('memes_guild_settings', {
       id: 'unsigned',
@@ -99,7 +99,7 @@ export async function apply(ctx: Context, config: Config) {
       platform: 'string',
       meme_key: 'string',
       enabled: 'boolean',
-    }, { primary: 'id', autoInc: true, indexes: [{ columns: ['guild_id', 'platform', 'meme_key'] }] })
+    }, { primary: 'id', autoInc: true, indexes: [['guild_id', 'platform', 'meme_key']] })
 
     ; (ctx as any).model.extend('memes_user_blocks', {
       id: 'unsigned',
@@ -108,7 +108,7 @@ export async function apply(ctx: Context, config: Config) {
       user_id: 'string',
       meme_key: 'string',
       blocked: 'boolean',
-    }, { primary: 'id', autoInc: true, indexes: [{ columns: ['guild_id', 'platform', 'user_id', 'meme_key'] }] })
+    }, { primary: 'id', autoInc: true, indexes: [['guild_id', 'platform', 'user_id', 'meme_key']] })
 
   // === API 初始化 ===
   let httpConfig: HttpConfig
