@@ -399,6 +399,15 @@ export async function apply(ctx: Context, config: Config) {
 
       const cmdPrefixRegex = (() => {
         if (config.shortcutUsePrefix) {
+          // 优先使用自定义前缀
+          if (config.shortcutPrefix && config.shortcutPrefix.length > 0) {
+            const hasEmptyPfx = config.shortcutPrefix.includes('')
+            const cmdPfxNotEmpty = config.shortcutPrefix.filter(Boolean)
+            if (cmdPfxNotEmpty.length) {
+              return `(?:${cmdPfxNotEmpty.map(escapeRegExp).join('|')})${hasEmptyPfx ? '?' : ''}`
+            }
+          }
+          // 回退到全局前缀
           const cmdPfxCfg = session.resolve((ctx as any).root.config.prefix)
           const cmdPfx = cmdPfxCfg instanceof Array ? cmdPfxCfg : [cmdPfxCfg ?? ""]
           const hasEmptyPfx = cmdPfx.includes("")

@@ -13,6 +13,7 @@ export enum ListSortBy {
 export interface GenerateCommandConfig {
   enableShortcut: boolean
   shortcutUsePrefix?: boolean
+  shortcutPrefix?: string[]
   silentShortcut?: boolean
   moreSilent?: boolean
   autoUseDefaultTexts: boolean
@@ -56,6 +57,7 @@ const shortcutCmdCfgWithSilent = Schema.intersect([
     Schema.object({
       enableShortcut: Schema.const(true),
       shortcutUsePrefix: Schema.boolean().default(true).description('快捷指令是否需要携带指令前缀'),
+      shortcutPrefix: Schema.array(String).role('table').default([]).description('自定义快捷指令前缀（留空则使用全局前缀）'),
       silentShortcut: Schema.boolean().default(false).description('禁用快捷指令的参数错误提示'),
     }),
     Schema.object({}),

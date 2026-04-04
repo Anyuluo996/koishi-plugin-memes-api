@@ -80,6 +80,15 @@ export async function apply(ctx: Context, config: Config) {
       // 计算指令前缀
       const cmdPrefixRegex = (() => {
         if (config.shortcutUsePrefix) {
+          // 优先使用自定义前缀
+          if (config.shortcutPrefix && config.shortcutPrefix.length > 0) {
+            const hasEmptyPfx = config.shortcutPrefix.includes('')
+            const cmdPfxNotEmpty = config.shortcutPrefix.filter(Boolean)
+            if (cmdPfxNotEmpty.length) {
+              return `(?:${cmdPfxNotEmpty.map(escapeRegExp).join('|')})${hasEmptyPfx ? '?' : ''}`
+            }
+          }
+          // 回退到全局前缀
           const prefixConfig = (ctx.root.config as any).prefix
           const cmdPfxCfg = session.resolve(prefixConfig)
           const cmdPfx = Array.isArray(cmdPfxCfg) ? cmdPfxCfg : [cmdPfxCfg ?? '']
