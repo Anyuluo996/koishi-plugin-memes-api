@@ -388,23 +388,42 @@ export async function apply(ctx: Context, config: Config) {
       shortcutDispose = undefined
     }
 
-    const shortcuts = []
+    const shortcuts: { name: string; pattern: string; flags: string; args: string[] }[] = []
     const blacklistRaw = await ctx.$.getBlacklistedKeywords()
     const blacklist = new Set(blacklistRaw.map(k => k.toLowerCase()))
 
     for (const info of Object.values(ctx.$.infos)) {
-      // 如果表情本身被拉黑，跳过快捷指令注册
       if (blacklist.has(info.key.toLowerCase())) continue
 
-      for (const { key, args } of info.shortcuts) {
-        // 这里很难判断正则是否包含拉黑词，但至少主Key被拉黑时整个跳过
+      // 关键词快捷方式（转成正则表达式）
+      for (const keyword of info.keywords) {
         shortcuts.push({
           name: info.key,
-          key: key,
-          args: args ?? []
+          pattern: escapeRegExp(keyword),
+          flags: '',
+          args: [],
         })
       }
+
+      // Python 风格正则快捷方式
+      for (const { key, args } of info.shortcuts) {
+        try {
+          const cleanKey = key.replace(/^\^/, '').replace(/\$$/, '')
+          const result = transformRegex(cleanKey)
+          shortcuts.push({
+            name: info.key,
+            pattern: result.pattern,
+            flags: result.flags,
+            args: args ?? [],
+          })
+        } catch (e) {
+          ctx.logger.warn(`Failed to parse shortcut regex "${key}" for meme "${info.key}":`, e)
+        }
+      }
     }
+
+    // 按 pattern 长度倒序，优先匹配长关键词
+    shortcuts.sort((a, b) => b.pattern.length - a.pattern.length)
 
     // 2. 注册新的中间件，并保存销毁函数
     shortcutDispose = (ctx as any).middleware(async (session: any, next: any) => {
@@ -433,19 +452,17 @@ export async function apply(ctx: Context, config: Config) {
         return ""
       })()
 
-      for (const { name, key, args } of shortcuts) {
-        const transformResult = transformRegex(key.replace(/^\^/, "").replace(/\$$/, ""))
-        const regexData = typeof transformResult === 'object' && transformResult.pattern
-          ? transformResult
-          : { pattern: transformResult, flags: '' }
-
-        const regexFlags = regexData.flags || ''
-        const res = new RegExp(`^${cmdPrefixRegex}${regexData.pattern}`, regexFlags).exec(content)
-        if (!res) continue
-
-        const argTxt = `${escapeArgs(resolveArgs(args, res))} ${content.slice(res.index + res[0].length)}`
-        session.inShortcut = true
-        return session.execute(`meme.generate.${name} ${argTxt}`)
+      for (const { name, pattern, flags, args } of shortcuts) {
+        try {
+          const res = new RegExp(`^${cmdPrefixRegex}${pattern}`, flags).exec(content)
+          if (!res) continue
+          const argTxt = `${shortcutEscapeArgs(resolveArgs(args, res))} ${content.slice(res.index + res[0].length)}`
+          session.inShortcut = true
+          return session.execute(`meme.generate.${name} ${argTxt}`)
+        } catch (e) {
+          ctx.logger.warn(`Shortcut regex match error for "${pattern}":`, e)
+          continue
+        }
       }
       return next()
     })
@@ -453,27 +470,65 @@ export async function apply(ctx: Context, config: Config) {
 
   // 正则表达式转换函数
   const transformRegex = (pythonRegex: string) => {
-    let result = pythonRegex.replace(/\(\?P<(?<n>\w+?)>/g, "(?<$<n>>")
+    let result = pythonRegex.replace(/\(\?P<(?<n>\w+?)>/g, '(?<$<n>>')
     const flags: string[] = []
-    result = result.replace(/\(\?([ims]+)\)/g, (match, flagStr) => {
+    result = result.replace(/\(\?([aiLmsux]+)\)/g, (match, flagStr) => {
       for (const flag of flagStr) {
-        if (!flags.includes(flag)) flags.push(flag)
+        if (['i', 'm', 's', 'u'].includes(flag) && !flags.includes(flag)) {
+          flags.push(flag)
+        }
       }
       return ''
     })
-    if (flags.includes('i')) return { pattern: result, flags: flags.join('') }
-    return result
+    if (flags.length) return { pattern: result, flags: flags.join('') }
+    return { pattern: result, flags: '' }
   }
 
   const escapeRegExp = (string: string) => string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  const escapeArgs = (args: any[]) => args.map(arg => String(arg).replace(/\s+/g, '\\s+')).join(' ')
-  const resolveArgs = (args: any[], res: any) => args.map(arg => {
-    if (typeof arg === 'string' && arg.startsWith('$')) {
-      const index = parseInt(arg.slice(1)) - 1
-      return res[index] || ''
+
+  // 提取 h.parse 后的文本内容
+  const extractContentPlaintext = (content: string) => {
+    let elems: any[]
+    try {
+      elems = h.parse(content)
+    } catch (e) {
+      return content
     }
-    return arg
-  })
+    const textBuffer: string[] = []
+    const visit = (e: any) => {
+      if (e.children && e.children.length) {
+        for (const child of e.children) visit(child)
+      }
+      if (e.type === 'text' && e.attrs?.content) {
+        textBuffer.push(e.attrs.content)
+      }
+    }
+    for (const child of elems) visit(child)
+    return textBuffer.join('')
+  }
+
+  // 解析参数并填充（支持 Python 风格 {1} / {group} 占位符）
+  const resolveArgs = (args: string[], res: any) => {
+    return args.map((v) => {
+      return v.replace(/(?<l>[^\{])?\{(?<v>.+?)\}(?<r>[^\}])?/g, (...m) => {
+        const groups = m[m.length - 1]
+        const { l, v, r } = groups as { l?: string; v: string; r?: string }
+        const index = parseInt(v)
+        let resolved: string
+        if (!isNaN(index)) {
+          resolved = res[index] ?? v
+        } else if (res.groups && v in res.groups) {
+          resolved = res.groups[v]
+        } else {
+          resolved = v
+        }
+        return `${l ?? ''}${extractContentPlaintext(resolved)}${r ?? ''}`
+      })
+    })
+  }
+
+  const shortcutEscapeArgs = (args: any[]) =>
+    args.map(arg => String(arg).replace(/\s+/g, '\\s+')).join(' ')
 
   await UserInfo.apply(ctx, config)
 
