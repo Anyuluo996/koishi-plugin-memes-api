@@ -16,6 +16,7 @@ export interface GenerateCommandConfig {
   shortcutPrefix?: string[]
   silentShortcut?: boolean
   moreSilent?: boolean
+  shortcutMatchMode?: 'start' | 'end' | 'both'
   autoUseDefaultTexts: boolean
   autoUseSenderAvatarWhenOnlyOne: boolean
   autoUseSenderAvatarWhenOneLeft: boolean
@@ -49,6 +50,11 @@ export interface RequestConfig {
 // Schema 定义
 const shortcutCmdConfig = Schema.object({
   enableShortcut: Schema.boolean().default(true).description('是否注册快捷指令（如：5000兆 ...）'),
+  shortcutMatchMode: Schema.union([
+    Schema.const('start' as const).description('仅在消息开头匹配（默认）'),
+    Schema.const('end' as const).description('仅在消息末尾匹配'),
+    Schema.const('both' as const).description('消息开头和末尾都匹配'),
+  ]).default('start').description('快捷指令匹配模式'),
 }).description('生成指令配置')
 
 const shortcutCmdCfgWithSilent = Schema.intersect([

@@ -452,11 +452,69 @@ export async function apply(ctx: Context, config: Config) {
         return ""
       })()
 
+      // 辅助函数：提取最后一个纯文本片段（排除图片、@等元素）
+      const extractLastTextSegment = (content: string): string => {
+        let elems: any[]
+        try {
+          elems = h.parse(content)
+        } catch {
+          return content
+        }
+        const texts: string[] = []
+        const visit = (e: any) => {
+          if (e.children?.length) e.children.forEach(visit)
+          if (e.type === 'text' && e.attrs?.content) texts.push(e.attrs.content)
+        }
+        elems.forEach(visit)
+        const combined = texts.join('')
+        // 取最后一个以非空白字符结尾的文本片段（最后一个"词"之前的内容）
+        const trimmed = combined.trimEnd()
+        const lastNonSpace = trimmed.search(/\s+\S*$/)
+        return lastNonSpace === -1 ? trimmed : trimmed.slice(lastNonSpace + 1)
+      }
+
+      // 辅助函数：在 content 中尝试开头匹配
+      const tryMatchAtStart = (fullContent: string, prefixRe: string, pattern: string, flags: string, args: string[]) => {
+        const re = new RegExp(`^${prefixRe}${pattern}`, flags)
+        const res = re.exec(fullContent)
+        if (!res) return undefined
+        const argTxt = `${shortcutEscapeArgs(resolveArgs(args, res))} ${fullContent.slice(res.index + res[0].length)}`
+        return argTxt
+      }
+
+      // 辅助函数：在 content 末尾（最后一个文本段末尾）尝试匹配
+      const tryMatchAtEnd = (fullContent: string, prefixRe: string, pattern: string, flags: string, args: string[]) => {
+        const lastSegment = extractLastTextSegment(fullContent)
+        if (!lastSegment) return undefined
+        // 在 lastSegment 末尾匹配（关键词必须在段末尾）
+        const re = new RegExp(`${prefixRe}${pattern}$`, flags)
+        const res = re.exec(lastSegment)
+        if (!res) return undefined
+        // 从 lastSegment 提取前缀内容作为参数（关键词前的内容）
+        const beforeKw = lastSegment.slice(0, res.index)
+        // 原始 content 中关键词之前的所有内容（含图片、@等）拼接上前缀文本
+        // 找到 lastSegment 在 fullContent 中的位置
+        const segStart = fullContent.lastIndexOf(lastSegment)
+        const beforeSeg = fullContent.slice(0, segStart)
+        const combinedBefore = `${beforeSeg}${beforeKw}`.trim()
+        const argTxt = `${shortcutEscapeArgs(resolveArgs(args, res))} ${combinedBefore}`
+        return argTxt
+      }
+
       for (const { name, pattern, flags, args } of shortcuts) {
         try {
-          const res = new RegExp(`^${cmdPrefixRegex}${pattern}`, flags).exec(content)
-          if (!res) continue
-          const argTxt = `${shortcutEscapeArgs(resolveArgs(args, res))} ${content.slice(res.index + res[0].length)}`
+          let argTxt: string | undefined
+
+          if (config.shortcutMatchMode !== 'end') {
+            argTxt = tryMatchAtStart(content, cmdPrefixRegex, pattern, flags, args)
+          }
+
+          if (!argTxt && config.shortcutMatchMode !== 'start') {
+            argTxt = tryMatchAtEnd(content, cmdPrefixRegex, pattern, flags, args)
+          }
+
+          if (!argTxt) continue
+
           session.inShortcut = true
           return session.execute(`meme.generate.${name} ${argTxt}`)
         } catch (e) {

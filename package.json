@@ -14,7 +14,9 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "build:webui": "node scripts/build-webui.js",
-    "prepublishOnly": "npm run build && npm run build:webui"
+    "prepublishOnly": "npm run build && npm run build:webui",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "keywords": [
     "chatbot",
@@ -60,7 +62,8 @@
     "@koishijs/scripts": "3.0.0",
     "@vitejs/plugin-vue": "^2.3.3",
     "esbuild": "0.27.2",
-    "koishi": "^4.18.10"
+    "koishi": "^4.18.10",
+    "vitest": "^4.1.4"
   },
   "dependencies": {
     "meme-generator-api": "^0.1.0",
