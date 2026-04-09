@@ -1,5 +1,7 @@
 import { Context, Logger, h, Session } from 'koishi'
 import { MemeAPI, MemeInfoResponse } from 'meme-generator-api'
+import * as fs from 'fs'
+import * as path from 'path'
 import pLimit from 'p-limit'
 
 import * as Commands from './commands'
@@ -53,6 +55,8 @@ export interface MemeInternal {
 
   reRegisterGenerateCommands(): Promise<void>
   refreshShortcuts(): Promise<void>
+  refreshListImage(): Promise<void>
+  getListImagePath(): string | undefined
   invalidateFindMemeCache(): void
   invalidateAllCaches(): void
 }
@@ -116,9 +120,12 @@ export async function apply(ctx: Context, config: Config) {
   let httpConfig: HttpConfig
   if (config.requestConfig && typeof config.requestConfig === 'object') {
     const { endpoint, ...rest } = config.requestConfig
-    httpConfig = { baseURL: endpoint, ...rest }
+    // 用户配置优先，超时过短时（< 60s）自动提升，防止 933 个表情请求超时
+    const userTimeout = (config.requestConfig as any)?.timeout
+    const timeout = userTimeout && userTimeout >= 60_000 ? userTimeout : 120_000
+    httpConfig = { baseURL: endpoint, timeout, ...rest }
   } else {
-    httpConfig = { baseURL: 'http://127.0.0.1:2233' }
+    httpConfig = { baseURL: 'http://127.0.0.1:2233', timeout: 120_000 }
   }
   ctx.$.api = new MemeAPI((ctx as any).http.extend(httpConfig))
   ctx.$.infos = {}
@@ -178,6 +185,37 @@ export async function apply(ctx: Context, config: Config) {
     return findMemeCache.get(query)
   }
 
+  // 表情列表图片路径
+  const LIST_IMAGE_NAME = 'meme-list.png'
+
+  // 表情列表图片：下载并保存到缓存目录
+  ctx.$.refreshListImage = async () => {
+    try {
+      const cacheDir = path.resolve(config.cacheDir)
+      fs.mkdirSync(cacheDir, { recursive: true })
+      const imgPath = path.join(cacheDir, LIST_IMAGE_NAME)
+      // 删除旧图
+      if (fs.existsSync(imgPath)) fs.unlinkSync(imgPath)
+      // 向后端请求表情列表图片
+      const keys = await ctx.$.api.getKeys()
+      const blob = await ctx.$.api.renderList({
+        meme_list: keys.map(k => ({ meme_key: k })),
+        text_template: config.listTextTemplate,
+        add_category_icon: config.listAddCategoryIcon,
+      })
+      fs.writeFileSync(imgPath, Buffer.from(await blob.arrayBuffer()))
+      logger.info(`表情列表图片已更新: ${imgPath}`)
+    } catch (e) {
+      logger.warn('刷新表情列表图片失败:', e)
+    }
+  }
+
+  // 获取表情列表图片路径（未生成时返回 undefined）
+  ctx.$.getListImagePath = () => {
+    const imgPath = path.resolve(config.cacheDir, LIST_IMAGE_NAME)
+    return fs.existsSync(imgPath) ? imgPath : undefined
+  }
+
   // 缓存失效函数，供其他模块调用
   ctx.$.invalidateFindMemeCache = () => {
     findMemeCache = null
@@ -186,6 +224,11 @@ export async function apply(ctx: Context, config: Config) {
   ctx.$.invalidateAllCaches = () => {
     findMemeCache = null
     blacklistCache = null
+    // 删除旧的表情列表图片
+    try {
+      const imgPath = path.resolve(config.cacheDir, LIST_IMAGE_NAME)
+      if (fs.existsSync(imgPath)) fs.unlinkSync(imgPath)
+    } catch (_) { }
   }
 
   // === 数据库操作函数 ===
@@ -586,7 +629,7 @@ export async function apply(ctx: Context, config: Config) {
   }
 
   const shortcutEscapeArgs = (args: any[]) =>
-    args.map(arg => String(arg).replace(/\s+/g, '\\s+')).join(' ')
+    args.map(arg => String(arg)).join(' ')
 
   await UserInfo.apply(ctx, config)
 
@@ -614,24 +657,23 @@ export async function apply(ctx: Context, config: Config) {
   try {
     await initMemeList()
   } catch (e: any) {
-    logger.warn('Failed to fetch meme list, plugin will not work')
-    logger.warn(e)
+    logger.warn('Failed to fetch meme list, continuing without memes:', e)
     const errorMsg = e.message || '未知错误'
       ; (ctx as any).timer.setTimeout(() => {
         ctx.$.notifier?.update({
-          type: 'danger',
+          type: 'warning',
           content: (
             <p>
-              <strong>⚠️ 插件初始化失败</strong>
+              <strong>⚠️ 表情包信息获取失败</strong>
               <br />
-              错误信息: {errorMsg}
-              <br /><br />
-              详细配置指南请查看插件文档
+              错误: {errorMsg}
+              <br />
+              表情列表功能暂时不可用，请检查后端连接。
             </p>
           ),
         })
       }, afterInitDelay)
-    return
+    // 不 return，插件继续初始化，表情列表图片在启动后重试
   }
 
   try {
@@ -668,4 +710,9 @@ export async function apply(ctx: Context, config: Config) {
       })
     }, afterInitDelay)
   logger.info(`Plugin initialized successfully, loaded ${memeCount} memes`)
+
+  // 后台生成表情列表图片（仅在表情加载成功后才请求）
+  if (memeCount > 0) {
+    ctx.$.refreshListImage().catch(() => {})
+  }
 }

@@ -29,6 +29,12 @@ export async function apply(ctx: Context, config: Config) {
       // 刷新快捷指令
       await ctx.$.refreshShortcuts?.()
 
+      // 刷新表情列表图片
+      await ctx.$.refreshListImage()
+
+      // 刷新表情列表图片
+      await ctx.$.refreshListImage()
+
       const totalMemes = Object.keys(ctx.$.infos).length
       await session.send(`✅ 表情信息更新完成！共获取到 ${totalMemes} 个表情包。`)
     } catch (error) {

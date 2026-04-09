@@ -156,11 +156,17 @@ const hasChanges = computed(() => {
   return JSON.stringify(localConfig.value) !== JSON.stringify(originalConfig.value)
 })
 
+function findMemesPluginKey(plugins: Record<string, any>): string | undefined {
+  // 动态查找插件 key，支持任意 fork id
+  return Object.keys(plugins).find(k => k.startsWith('~@anyul/memes-api'))
+}
+
 function loadConfig() {
   try {
     const plugins = configData?.plugins
-    if (plugins && plugins['~@anyul/memes-api:66gcya']) {
-      const cfg = { ...plugins['~@anyul/memes-api:66gcya'] }
+    const pluginKey = plugins ? findMemesPluginKey(plugins) : undefined
+    if (pluginKey && plugins[pluginKey]) {
+      const cfg = { ...plugins[pluginKey] }
       // 确保 shortcutPrefix 是数组
       if (!Array.isArray(cfg.shortcutPrefix)) {
         cfg.shortcutPrefix = []
@@ -177,9 +183,12 @@ async function saveConfig() {
   if (saving.value) return
   saving.value = true
   try {
+    const plugins = configData?.plugins
+    const pluginKey = plugins ? findMemesPluginKey(plugins) : undefined
+    if (!pluginKey) throw new Error('找不到插件配置')
     // 使用 send 触发 manager/reload 来保存配置
     // manager/reload(parent, key, config) - parent 通常是 '$'，key 是插件的 fork 标识
-    await send('manager/reload', '$', '~@anyul/memes-api:66gcya', localConfig.value)
+    await send('manager/reload', '$', pluginKey, localConfig.value)
     originalConfig.value = JSON.parse(JSON.stringify(localConfig.value))
     ElMessage.success('设置已保存')
   } catch (e: any) {

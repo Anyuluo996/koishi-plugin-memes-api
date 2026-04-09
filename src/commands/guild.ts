@@ -18,7 +18,8 @@ export async function apply(ctx: Context, config: Config) {
   enableGuildCmd.action(async ({ session }, memeInput, guildId) => {
     if (!session) return
 
-    const targetGuildId = session.guildId ?? guildId
+    // 显式传入 guild_id 时优先使用，允许管理其他群组；在私聊中无参数时才用 session.guildId
+    const targetGuildId = guildId !== undefined && guildId !== '' ? guildId : session.guildId
     if (!targetGuildId) {
       await session.send('❌ 请在群组中使用此命令或指定群组ID！')
       return
@@ -75,7 +76,8 @@ export async function apply(ctx: Context, config: Config) {
   disableGuildCmd.action(async ({ session }, memeInput, guildId) => {
     if (!session) return
 
-    const targetGuildId = session.guildId ?? guildId
+    // 显式传入 guild_id 时优先使用，允许管理其他群组；在私聊中无参数时才用 session.guildId
+    const targetGuildId = guildId !== undefined && guildId !== '' ? guildId : session.guildId
     if (!targetGuildId) {
       await session.send('❌ 请在群组中使用此命令或指定群组ID！')
       return
@@ -117,7 +119,8 @@ export async function apply(ctx: Context, config: Config) {
   guildListCmd.action(async ({ session }, guildId) => {
     if (!session) return
 
-    const targetGuildId = session.guildId ?? guildId
+    // 显式传入 guild_id 时优先使用，允许管理其他群组；在私聊中无参数时才用 session.guildId
+    const targetGuildId = guildId !== undefined && guildId !== '' ? guildId : session.guildId
     if (!targetGuildId) {
       await session.send('❌ 请在群组中使用此命令或指定群组ID！')
       return
