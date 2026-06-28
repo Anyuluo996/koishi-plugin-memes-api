@@ -84,19 +84,25 @@ export async function apply(ctx: Context, config: Config) {
         if (blocked) continue
       }
 
-      let img: Blob
+      // 渲染结果缓存：与 generate 共用，对重复随机的相同组合有益
+      const randomTexts = autoUse ? info.params_type.default_texts : texts
+      const cacheKey = ctx.$.renderCache.computeKey(info.key, imageInfos, randomTexts, undefined)
+      let entry
       try {
-        img = await ctx.$.api.renderMeme(info.key, {
-          texts: autoUse ? info.params_type.default_texts : texts,
-          images,
-          args: { user_infos: userInfos },
+        entry = await ctx.$.renderCache.dedup(cacheKey, async () => {
+          const img = await ctx.$.api.renderMeme(info.key, {
+            texts: randomTexts,
+            images,
+            args: { user_infos: userInfos },
+          })
+          return { buffer: Buffer.from(await img.arrayBuffer()), mime: img.type }
         })
       } catch (e) {
         ctx.logger.warn(e)
         continue
       }
 
-      const elems = [h.image(await img.arrayBuffer(), img.type)]
+      const elems = [h.image(entry.buffer, entry.mime)]
       if (config.randomMemeShowInfo) {
         elems.unshift(
           ...session.i18n('memes-api.random.info', [formatKeywords(info.keywords)]),

@@ -6,6 +6,7 @@ import pLimit from 'p-limit'
 
 import * as Commands from './commands'
 import { Config } from './config'
+import { RenderCache } from './cache'
 import zhCNLocale from './locales/zh-CN'
 import type { HttpConfig, MemeUsageRecord, GuildSettingRecord, UserBlockRecord } from './types/internal'
 import * as UserInfo from './user-info'
@@ -26,6 +27,7 @@ export interface MemeInternal {
   notifier?: Notifier
   api: MemeAPI
   infos: Record<string, MemeInfoResponse>
+  renderCache: RenderCache
   cmd?: any
   updateInfos: (
     progressCallback?: (now: number, total: number) => void,
@@ -129,6 +131,22 @@ export async function apply(ctx: Context, config: Config) {
   }
   ctx.$.api = new MemeAPI((ctx as any).http.extend(httpConfig))
   ctx.$.infos = {}
+
+  // === 渲染缓存初始化 ===
+  ctx.$.renderCache = new RenderCache(
+    {
+      enabled: config.renderCacheEnabled,
+      ttl: config.renderCacheTtl,
+      maxEntries: config.renderCacheMaxEntries,
+      maxSize: config.renderCacheMaxSize,
+      persist: config.renderCachePersist,
+    },
+    config.cacheDir,
+  )
+  // keepCache=false 时启动清空旧渲染缓存文件
+  if (config.renderCacheEnabled && config.renderCachePersist && !config.keepCache) {
+    ctx.$.renderCache.clearDisk()
+  }
 
   ctx.$.updateInfos = async (progressCallback) => {
     const keys = await ctx.$.api.getKeys()

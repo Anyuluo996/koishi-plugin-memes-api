@@ -40,6 +40,11 @@ export interface OtherCommandConfig {
 export interface CacheConfig {
   cacheDir: string
   keepCache: boolean
+  renderCacheEnabled: boolean
+  renderCacheTtl: number
+  renderCacheMaxEntries: number
+  renderCacheMaxSize: number
+  renderCachePersist: boolean
 }
 
 export interface RequestConfig {
@@ -120,6 +125,12 @@ export const CacheConfigSchema = Schema.object({
     allowCreate: true,
   }).default('cache/memes').description('缓存目录'),
   keepCache: Schema.boolean().default(false).description('重启不清理缓存'),
+
+  renderCacheEnabled: Schema.boolean().default(true).description('启用渲染结果缓存'),
+  renderCacheTtl: Schema.natural().role('ms').default(1800000).description('渲染缓存有效期(ms)，默认 30 分钟'),
+  renderCacheMaxEntries: Schema.natural().default(200).description('渲染缓存内存最大条数'),
+  renderCacheMaxSize: Schema.natural().role('byte').default(104857600).description('渲染缓存内存最大字节'),
+  renderCachePersist: Schema.boolean().default(true).description('渲染缓存持久化到文件系统（重启可复用）'),
 }).hidden()
 
 // 定义 HttpConfigSchema

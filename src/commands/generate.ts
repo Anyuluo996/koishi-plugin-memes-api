@@ -433,19 +433,25 @@ export async function apply(ctx: Context, config: Config) {
 
           if (config.debug) logger.info('[DEBUG] Starting render...')
 
-          let img: Blob
+          // 渲染结果缓存：fast 模式，命中时跳过下载+渲染
+          // 注意：cacheKey 在 resolveImagesAndInfos 之后计算，但用 imageInfos（描述符）而非图片字节
+          const cacheKey = ctx.$.renderCache.computeKey(info.key, imageInfos, texts, options)
+          let entry
           try {
-            img = await ctx.$.api.renderMeme(info.key, {
-              images,
-              texts,
-              args: { ...(options ?? {}), user_infos: userInfos },
+            entry = await ctx.$.renderCache.dedup(cacheKey, async () => {
+              const img = await ctx.$.api.renderMeme(info.key, {
+                images,
+                texts,
+                args: { ...(options ?? {}), user_infos: userInfos },
+              })
+              return { buffer: Buffer.from(await img.arrayBuffer()), mime: img.type }
             })
           } catch (e) {
             return ctx.$.handleRenderError(session, e)
           }
 
           ctx.$.recordMemeUsage(session, info.key).catch(() => { })
-          return h.image(await img.arrayBuffer(), img.type)
+          return h.image(entry.buffer, entry.mime)
 
         } catch (error: unknown) {
           logger.warn(`Action error: ${error instanceof Error ? error.message : String(error)}`)
