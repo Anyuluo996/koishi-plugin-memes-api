@@ -9,6 +9,7 @@ import * as Shortcut from './shortcut'
 import * as Blacklist from './blacklist'
 import * as Refresh from './refresh'
 import * as Stats from './stats'
+import * as Cache from './cache'
 import * as Guild from './guild'
 import * as UserBlock from './user-block'
 
@@ -28,6 +29,7 @@ export async function apply(ctx: Context, config: Config) {
   await Blacklist.apply(ctx, config)
   await Refresh.apply(ctx, config)
   await Stats.apply(ctx, config)
+  await Cache.apply(ctx, config)
   await Guild.apply(ctx, config)
   await UserBlock.apply(ctx, config)
 }

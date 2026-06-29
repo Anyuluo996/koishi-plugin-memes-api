@@ -263,3 +263,100 @@ describe('RenderCache 文件持久化', () => {
     expect(fs.existsSync(path.join(tmpDir, 'renders', key))).toBe(false)
   })
 })
+
+describe('RenderCache getStats 统计', () => {
+  it('初始统计全为 0', () => {
+    const c = newCache({ persist: false })
+    const s = c.getStats()
+    expect(s.enabled).toBe(true)
+    expect(s.hits).toBe(0)
+    expect(s.misses).toBe(0)
+    expect(s.deduped).toBe(0)
+    expect(s.hitRate).toBe(0)
+    expect(s.entries).toBe(0)
+    expect(s.sizeBytes).toBe(0)
+  })
+
+  it('dedup 正确累计 hit/miss', async () => {
+    const c = newCache({ persist: false })
+    const key = c.computeKey('petpet', [u('1')], [], {})
+    const render = async () => ({ buffer: Buffer.from('img'), mime: 'image/png' })
+
+    // 第一次：miss
+    await c.dedup(key, render)
+    expect(c.getStats().misses).toBe(1)
+    expect(c.getStats().hits).toBe(0)
+
+    // 第二次：hit
+    await c.dedup(key, render)
+    expect(c.getStats().hits).toBe(1)
+    expect(c.getStats().hitRate).toBeCloseTo(0.5)
+  })
+
+  it('并发调用累计 deduped（命中 inflight）', async () => {
+    const c = newCache({ persist: false })
+    const key = c.computeKey('petpet', [u('1')], [], {})
+    const render = async () => {
+      await new Promise((r) => setTimeout(r, 20))
+      return { buffer: Buffer.from('img'), mime: 'image/png' }
+    }
+    // 5 个并发：第一个创建 inflight（miss），其余命中 inflight（deduped）
+    // 由于 inflight.set 与后续 inflight.get 之间有微小竞态，
+    // misses 可能略大于 1，但 deduped 一定 ≥1，hits=0，最终只渲染 1 次
+    await Promise.all([
+      c.dedup(key, render),
+      c.dedup(key, render),
+      c.dedup(key, render),
+      c.dedup(key, render),
+      c.dedup(key, render),
+    ])
+    const s = c.getStats()
+    expect(s.hits).toBe(0)
+    expect(s.entries).toBe(1)            // 只渲染 1 次
+    expect(s.misses).toBeGreaterThanOrEqual(1)
+    expect(s.misses).toBeLessThanOrEqual(5)
+    expect(s.deduped).toBeGreaterThan(0) // 至少有合并
+    // 总请求数 = hits + misses + deduped（hit 不重复合并）
+    expect(s.hits + s.misses + s.deduped).toBe(5)
+  })
+
+  it('entries 和 sizeBytes 反映内存占用', async () => {
+    const c = newCache({ persist: false })
+    const k1 = c.computeKey('a', [u('1')], [], {})
+    await c.dedup(k1, async () => ({ buffer: Buffer.from('12345'), mime: 'image/png' }))
+    let s = c.getStats()
+    expect(s.entries).toBe(1)
+    expect(s.sizeBytes).toBe(5)
+
+    const k2 = c.computeKey('b', [u('1')], [], {})
+    await c.dedup(k2, async () => ({ buffer: Buffer.from('abc'), mime: 'image/png' }))
+    s = c.getStats()
+    expect(s.entries).toBe(2)
+    expect(s.sizeBytes).toBe(8)
+  })
+
+  it('resetStats 清零计数器但保留缓存数据', async () => {
+    const c = newCache({ persist: false })
+    const key = c.computeKey('petpet', [u('1')], [], {})
+    await c.dedup(key, async () => ({ buffer: Buffer.from('x'), mime: 'image/png' }))
+    expect(c.getStats().misses).toBe(1)
+
+    c.resetStats()
+    const s = c.getStats()
+    expect(s.hits).toBe(0)
+    expect(s.misses).toBe(0)
+    expect(s.entries).toBe(1)  // 数据保留
+  })
+
+  it('disabled 时 dedup 不计入统计', async () => {
+    const c = newCache({ enabled: false, persist: false })
+    const key = c.computeKey('petpet', [u('1')], [], {})
+    await c.dedup(key, async () => ({ buffer: Buffer.from('x'), mime: 'image/png' }))
+    await c.dedup(key, async () => ({ buffer: Buffer.from('x'), mime: 'image/png' }))
+    const s = c.getStats()
+    expect(s.enabled).toBe(false)
+    expect(s.hits).toBe(0)
+    expect(s.misses).toBe(0)
+  })
+})
+

@@ -53,11 +53,26 @@ function imageToken(info: ImageFetchInfo): string {
  *
  * fast 模式：用 userId/src（而非图片字节）当 key，可在下载前命中，跳过下载+渲染。
  */
+export interface RenderCacheStats {
+  enabled: boolean
+  hits: number
+  misses: number
+  deduped: number          // 并发合并次数（命中 inflight）
+  hitRate: number          // 命中率 = hits / (hits + misses)
+  entries: number          // 当前内存条目数
+  sizeBytes: number        // 当前内存总字节
+  persist: boolean
+}
+
 export class RenderCache {
   private mem = new Map<string, CacheEntry>()   // Map 天然插入序 → 做 LRU
   private inflight = new Map<string, Promise<CacheEntry>>()
   private memBytes = 0
   private readonly dir: string
+  // 统计计数器
+  private hits = 0
+  private misses = 0
+  private deduped = 0
 
   constructor(
     private readonly opts: RenderCacheOptions,
@@ -71,6 +86,28 @@ export class RenderCache {
         // 目录创建失败不致命：降级为纯内存缓存
       }
     }
+  }
+
+  /** 缓存统计快照 */
+  getStats(): RenderCacheStats {
+    const total = this.hits + this.misses
+    return {
+      enabled: this.opts.enabled,
+      hits: this.hits,
+      misses: this.misses,
+      deduped: this.deduped,
+      hitRate: total === 0 ? 0 : this.hits / total,
+      entries: this.mem.size,
+      sizeBytes: this.memBytes,
+      persist: this.opts.persist,
+    }
+  }
+
+  /** 重置统计计数器（不清缓存数据） */
+  resetStats(): void {
+    this.hits = 0
+    this.misses = 0
+    this.deduped = 0
   }
 
   /** 计算缓存键（fast 模式，下载前即可计算） */
@@ -101,10 +138,15 @@ export class RenderCache {
     }
 
     const hit = this.get(key)
-    if (hit) return hit
+    if (hit) {
+      this.hits++
+      return hit
+    }
 
     let p = this.inflight.get(key)
     if (!p) {
+      // 真正未命中：创建 inflight 并渲染（只有这条路径算 miss）
+      this.misses++
       p = (async () => {
         const r = await render()
         return this.set(key, r.buffer, r.mime)
@@ -113,6 +155,9 @@ export class RenderCache {
         this.inflight.delete(key)
       })
       this.inflight.set(key, p)
+    } else {
+      // 命中正在进行的渲染：并发合并（不算 miss，已由首个请求计 miss）
+      this.deduped++
     }
     return p
   }
