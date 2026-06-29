@@ -36,11 +36,28 @@ function stableStringify(value: any, excludeKeys: Set<string> = new Set(['user_i
 }
 
 /**
+ * URL 规范化：移除已知的易变查询参数（QQ/微信 CDN 的 time/sig/nonce）
+ * 仅用于 cacheKey 计算，不影响实际下载（下载用原始 src）
+ */
+function normalizeSrc(src: string): string {
+  try {
+    const u = new URL(src)
+    for (const k of ['time', 'sig', 'sign', 'nonce', '_', 'expire', 'expires']) {
+      u.searchParams.delete(k)
+    }
+    return u.origin + u.pathname + (u.search || '')
+  } catch {
+    return src  // 非 URL 原样返回
+  }
+}
+
+/**
  * 计算图片描述符 token：渲染前已知信息，无需下载
  * userId 稳定映射到头像 URL（q.qlogo.cn?dst_uin=${userId}）
+ * src 走规范化以对抗 CDN 签名漂移
  */
 function imageToken(info: ImageFetchInfo): string {
-  return 'userId' in info ? `u:${info.userId}` : `s:${info.src}`
+  return 'userId' in info ? `u:${info.userId}` : `s:${normalizeSrc(info.src)}`
 }
 
 /**
@@ -62,6 +79,12 @@ export interface RenderCacheStats {
   entries: number          // 当前内存条目数
   sizeBytes: number        // 当前内存总字节
   persist: boolean
+  // 头像下载缓存
+  avatarHits: number
+  avatarMisses: number
+  avatarEntries: number
+  avatarSizeBytes: number
+  avatarHitRate: number
 }
 
 export class RenderCache {
@@ -69,10 +92,15 @@ export class RenderCache {
   private inflight = new Map<string, Promise<CacheEntry>>()
   private memBytes = 0
   private readonly dir: string
-  // 统计计数器
+  // 渲染结果统计计数器
   private hits = 0
   private misses = 0
   private deduped = 0
+  // 头像下载缓存（url → Blob，内存 only，不持久化）
+  private avatarCache = new Map<string, { blob: Blob; ts: number; size: number }>()
+  private avatarBytes = 0
+  private avatarHits = 0
+  private avatarMisses = 0
 
   constructor(
     private readonly opts: RenderCacheOptions,
@@ -91,6 +119,7 @@ export class RenderCache {
   /** 缓存统计快照 */
   getStats(): RenderCacheStats {
     const total = this.hits + this.misses
+    const avatarTotal = this.avatarHits + this.avatarMisses
     return {
       enabled: this.opts.enabled,
       hits: this.hits,
@@ -100,6 +129,11 @@ export class RenderCache {
       entries: this.mem.size,
       sizeBytes: this.memBytes,
       persist: this.opts.persist,
+      avatarHits: this.avatarHits,
+      avatarMisses: this.avatarMisses,
+      avatarEntries: this.avatarCache.size,
+      avatarSizeBytes: this.avatarBytes,
+      avatarHitRate: avatarTotal === 0 ? 0 : this.avatarHits / avatarTotal,
     }
   }
 
@@ -108,6 +142,49 @@ export class RenderCache {
     this.hits = 0
     this.misses = 0
     this.deduped = 0
+    this.avatarHits = 0
+    this.avatarMisses = 0
+  }
+
+  /**
+   * 头像下载缓存：url → Blob。
+   * 同一 url（头像稳定）在 TTL 内不重复下载，省掉 q.qlogo.cn 的 0.2~1s。
+   * 仅内存缓存，不持久化（Blob 不便序列化）。
+   * disabled 时透传（每次下载，但仍走 fetcher，统计不计）。
+   */
+  async getAvatar(url: string, fetcher: () => Promise<Blob>): Promise<Blob> {
+    if (!this.opts.enabled) return fetcher()
+
+    const hit = this.avatarCache.get(url)
+    if (hit && Date.now() - hit.ts < this.opts.ttl) {
+      // LRU touch + 命中计数
+      this.avatarCache.delete(url)
+      this.avatarCache.set(url, hit)
+      this.avatarHits++
+      return hit.blob
+    }
+
+    const blob = await fetcher()
+    this.avatarMisses++
+    const size = blob.size
+    this.evictAvatar(size)
+    this.avatarCache.set(url, { blob, ts: Date.now(), size })
+    this.avatarBytes += size
+    return blob
+  }
+
+  /** 头像缓存 LRU 淡出（按 maxEntries/maxSize 双限） */
+  private evictAvatar(incoming: number): void {
+    while (
+      (this.opts.maxSize > 0 && this.avatarBytes + incoming > this.opts.maxSize) ||
+      (this.opts.maxEntries > 0 && this.avatarCache.size >= this.opts.maxEntries)
+    ) {
+      const oldest = this.avatarCache.keys().next().value as string | undefined
+      if (oldest === undefined) break
+      const e = this.avatarCache.get(oldest)
+      this.avatarCache.delete(oldest)
+      if (e) this.avatarBytes -= e.size
+    }
   }
 
   /** 计算缓存键（fast 模式，下载前即可计算） */

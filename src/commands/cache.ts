@@ -34,21 +34,25 @@ export async function apply(ctx: Context, config: Config) {
       }
 
       const totalRequests = stats.hits + stats.misses
+      const avatarTotal = stats.avatarHits + stats.avatarMisses
       const lines = [
         '📊 渲染缓存统计',
         '━━━━━━━━━━━━━━━━━━',
         `状态: ${stats.enabled ? '✅ 已启用' : '❌ 已禁用'}`,
         `持久化: ${stats.persist ? '✅ 是' : '❌ 否'}`,
         '',
-        '⚡ 性能',
+        '⚡ 渲染性能',
         `总请求: ${totalRequests}`,
         `命中: ${stats.hits} | 未命中: ${stats.misses}`,
         `命中率: ${formatPercent(stats.hitRate)}`,
         `并发合并: ${stats.deduped} 次`,
+        `条目数: ${stats.entries} | 占用: ${formatBytes(stats.sizeBytes)}`,
         '',
-        '💾 内存',
-        `条目数: ${stats.entries}`,
-        `占用: ${formatBytes(stats.sizeBytes)}`,
+        '🖼️ 头像下载缓存',
+        `总请求: ${avatarTotal}`,
+        `命中: ${stats.avatarHits} | 未命中: ${stats.avatarMisses}`,
+        `命中率: ${formatPercent(stats.avatarHitRate)}`,
+        `条目数: ${stats.avatarEntries} | 占用: ${formatBytes(stats.avatarSizeBytes)}`,
       ]
 
       await session.send(lines.join('\n'))

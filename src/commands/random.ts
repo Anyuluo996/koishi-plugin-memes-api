@@ -85,8 +85,10 @@ export async function apply(ctx: Context, config: Config) {
       }
 
       // 渲染结果缓存：与 generate 共用，对重复随机的相同组合有益
+      // texts 归一化：autoUse（用户未传文字）时用固定标记，避免 default_texts 漂移导致 miss
       const randomTexts = autoUse ? info.params_type.default_texts : texts
-      const cacheKey = ctx.$.renderCache.computeKey(info.key, imageInfos, randomTexts, undefined)
+      const cacheTexts = autoUse ? ['__auto_default__'] : randomTexts
+      const cacheKey = ctx.$.renderCache.computeKey(info.key, imageInfos, cacheTexts, undefined)
       let entry
       try {
         entry = await ctx.$.renderCache.dedup(cacheKey, async () => {

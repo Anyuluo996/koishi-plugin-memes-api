@@ -190,7 +190,9 @@ export async function apply(ctx: Context, config: Config) {
         if ('src' in info) { url = info.src; userInfo = {} }
         else if ('userId' in info) { ({ url, userInfo } = await ctx.$.getInfoFromID(session, info.userId)) }
         else throw new Error('Invalid image info')
-        imageMap[key] = constructBlobFromFileResp(await ctx.http.file(url))
+        // 走头像下载缓存：同一 url 在 TTL 内不重复下载（省 q.qlogo.cn 0.2~1s）
+        imageMap[key] = await ctx.$.renderCache.getAvatar(url, async () =>
+          constructBlobFromFileResp(await ctx.http.file(url)))
         userInfoMap[key] = userInfo
       })
     )
@@ -389,7 +391,9 @@ export async function apply(ctx: Context, config: Config) {
             (config.autoUseSenderAvatarWhenOneLeft && imageInfos.length && imageInfos.length + 1 === min_images)
           )
           if (autoUseAvatar) imageInfos.unshift({ userId: session.userId })
-          if (!texts.length && config.autoUseDefaultTexts) texts.push(...default_texts)
+          // 记录是否用户主动传了文字（用于 cacheKey 归一化，避免 default_texts 漂移导致 miss）
+          const autoUseTexts = !texts.length && config.autoUseDefaultTexts
+          if (autoUseTexts) texts.push(...default_texts)
 
           // 用户屏蔽检查
           if (guildId !== 'private') {
@@ -435,7 +439,9 @@ export async function apply(ctx: Context, config: Config) {
 
           // 渲染结果缓存：fast 模式，命中时跳过下载+渲染
           // 注意：cacheKey 在 resolveImagesAndInfos 之后计算，但用 imageInfos（描述符）而非图片字节
-          const cacheKey = ctx.$.renderCache.computeKey(info.key, imageInfos, texts, options)
+          // texts 归一化：用户未传文字时用固定标记，避免 default_texts 漂移导致 miss
+          const cacheTexts = autoUseTexts ? ['__auto_default__'] : texts
+          const cacheKey = ctx.$.renderCache.computeKey(info.key, imageInfos, cacheTexts, options)
           let entry
           try {
             entry = await ctx.$.renderCache.dedup(cacheKey, async () => {

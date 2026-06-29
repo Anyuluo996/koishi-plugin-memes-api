@@ -360,3 +360,108 @@ describe('RenderCache getStats 统计', () => {
   })
 })
 
+describe('RenderCache 头像下载缓存 getAvatar', () => {
+  const mkBlob = (size: number) => new Blob([new Uint8Array(size)])
+
+  it('首次下载算 miss，第二次命中算 hit', async () => {
+    const c = newCache({ persist: false })
+    let downloadCount = 0
+    const fetcher = async () => { downloadCount++; return mkBlob(100) }
+    await c.getAvatar('http://q.qlogo.cn/u1', fetcher)
+    await c.getAvatar('http://q.qlogo.cn/u1', fetcher)
+    expect(downloadCount).toBe(1)              // 只下载 1 次
+    const s = c.getStats()
+    expect(s.avatarHits).toBe(1)
+    expect(s.avatarMisses).toBe(1)
+    expect(s.avatarHitRate).toBeCloseTo(0.5)
+  })
+
+  it('不同 url 不命中', async () => {
+    const c = newCache({ persist: false })
+    let downloadCount = 0
+    const fetcher = async () => { downloadCount++; return mkBlob(100) }
+    await c.getAvatar('http://q.qlogo.cn/u1', fetcher)
+    await c.getAvatar('http://q.qlogo.cn/u2', fetcher)
+    expect(downloadCount).toBe(2)
+    expect(c.getStats().avatarMisses).toBe(2)
+    expect(c.getStats().avatarHits).toBe(0)
+  })
+
+  it('返回缓存的同一个 Blob 实例（不重复下载）', async () => {
+    const c = newCache({ persist: false })
+    const blob = mkBlob(100)
+    const b1 = await c.getAvatar('http://q.qlogo.cn/u1', async () => blob)
+    const b2 = await c.getAvatar('http://q.qlogo.cn/u1', async () => mkBlob(100))
+    expect(b1).toBe(b2)  // 第二次应返回缓存的第一个 blob，不调 fetcher
+  })
+
+  it('TTL 过期后重新下载', async () => {
+    const c = newCache({ ttl: 10, persist: false })  // 10ms
+    let downloadCount = 0
+    const fetcher = async () => { downloadCount++; return mkBlob(100) }
+    await c.getAvatar('http://q.qlogo.cn/u1', fetcher)
+    await new Promise((r) => setTimeout(r, 30))  // 等 TTL 过期
+    await c.getAvatar('http://q.qlogo.cn/u1', fetcher)
+    expect(downloadCount).toBe(2)  // 过期后重新下载
+  })
+
+  it('LRU 淘汰：超过 maxSize 淡出最旧', async () => {
+    const c = newCache({ maxSize: 250, persist: false })  // 只能装 2 个 100B
+    await c.getAvatar('http://q.qlogo.cn/u1', async () => mkBlob(100))
+    await c.getAvatar('http://q.qlogo.cn/u2', async () => mkBlob(100))
+    await c.getAvatar('http://q.qlogo.cn/u3', async () => mkBlob(100))  // 挤掉 u1
+    const s = c.getStats()
+    expect(s.avatarEntries).toBeLessThanOrEqual(2)
+    expect(s.avatarSizeBytes).toBeLessThanOrEqual(250)
+  })
+
+  it('disabled 时透传不缓存不计统计', async () => {
+    const c = newCache({ enabled: false, persist: false })
+    let downloadCount = 0
+    const fetcher = async () => { downloadCount++; return mkBlob(100) }
+    await c.getAvatar('http://q.qlogo.cn/u1', fetcher)
+    await c.getAvatar('http://q.qlogo.cn/u1', fetcher)
+    expect(downloadCount).toBe(2)  // 不缓存，每次都下载
+    const s = c.getStats()
+    expect(s.avatarHits).toBe(0)
+    expect(s.avatarMisses).toBe(0)
+  })
+})
+
+describe('RenderCache URL 规范化 normalizeSrc', () => {
+  const c = new RenderCache(
+    { enabled: true, ttl: 1800000, maxEntries: 200, maxSize: 100 * 1024 * 1024, persist: false },
+    '/tmp/unused',
+  )
+
+  it('去掉易变参数（time/sig/nonce）后 key 一致', () => {
+    const k1 = c.computeKey('m', [s('https://cdn.qq.com/img/abc.png?time=123&sig=xyz')], [], {})
+    const k2 = c.computeKey('m', [s('https://cdn.qq.com/img/abc.png?time=456&sig=def')], [], {})
+    expect(k1).toBe(k2)  // 规范化后命中
+  })
+
+  it('保留稳定的 query 参数（如 spec=640）', () => {
+    const k1 = c.computeKey('m', [s('https://q.qlogo.cn/headimg?dst_uin=1&spec=640')], [], {})
+    const k2 = c.computeKey('m', [s('https://q.qlogo.cn/headimg?dst_uin=1&spec=640&time=999')], [], {})
+    expect(k1).toBe(k2)  // 去掉 time，保留 spec=640，命中
+  })
+
+  it('不同路径仍然不命中', () => {
+    const k1 = c.computeKey('m', [s('https://cdn.qq.com/img/a.png')], [], {})
+    const k2 = c.computeKey('m', [s('https://cdn.qq.com/img/b.png')], [], {})
+    expect(k1).not.toBe(k2)
+  })
+
+  it('非 URL 的 src 原样保留', () => {
+    const k1 = c.computeKey('m', [s('not-a-url-abc')], [], {})
+    const k2 = c.computeKey('m', [s('not-a-url-abc')], [], {})
+    expect(k1).toBe(k2)
+  })
+
+  it('userId 不受规范化影响', () => {
+    const k1 = c.computeKey('m', [u('123')], [], {})
+    const k2 = c.computeKey('m', [u('123')], [], {})
+    expect(k1).toBe(k2)
+  })
+})
+
