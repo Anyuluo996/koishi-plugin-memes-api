@@ -1,5 +1,6 @@
 import { Context, Logger } from 'koishi'
 import { Config } from '../config'
+import { errorMessage } from '../utils'
 
 const logger = new Logger('memes-refresh')
 
@@ -29,17 +30,14 @@ export async function apply(ctx: Context, config: Config) {
       // 刷新快捷指令
       await ctx.$.refreshShortcuts?.()
 
-      // 刷新表情列表图片
-      await ctx.$.refreshListImage()
-
-      // 刷新表情列表图片
+      // 刷新表情列表图片（仅需一次，之前由于复制粘贴被调用了两次）
       await ctx.$.refreshListImage()
 
       const totalMemes = Object.keys(ctx.$.infos).length
       await session.send(`✅ 表情信息更新完成！共获取到 ${totalMemes} 个表情包。`)
     } catch (error) {
       logger.warn('手动获取表情信息失败', error)
-      await session.send(`❌ 获取表情信息失败: ${error.message}`)
+      await session.send(`❌ 获取表情信息失败: ${errorMessage(error)}`)
     }
   })
 }

@@ -1,5 +1,6 @@
 import { Context, Logger } from 'koishi'
 import { Config } from '../config'
+import { errorMessage } from '../utils'
 import { getGuildId, getGuildDisplay } from '../types/internal'
 
 const logger = new Logger('memes-stats')
@@ -58,7 +59,7 @@ export async function apply(ctx: Context, config: Config) {
       }
     } catch (error) {
       logger.warn('获取表情包统计失败', error)
-      await session.send(`❌ 获取统计信息失败: ${error.message}`)
+      await session.send(`❌ 获取统计信息失败: ${errorMessage(error)}`)
     }
   })
 }

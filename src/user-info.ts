@@ -89,6 +89,9 @@ export async function apply(ctx: Context, config: Config) {
         )
         return ctx.$.getInfoFromID(session, userId, true)
       }
+      // fallback 也失败：统一包装成 GetAvatarFailedError
+      // （让 handleResolveImagesAndInfosError 能识别并给出友好提示）
+      if (e instanceof GetAvatarFailedError) throw e
       throw new GetAvatarFailedError(session.platform, userId)
     }
   }

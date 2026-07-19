@@ -138,7 +138,25 @@ export function checkInRange(value: number, min: number, max: number): boolean {
 }
 
 export function constructBlobFromFileResp(resp: FileResponse): Blob {
+  // 防御性校验：空响应 / 缺失 data 应当显式失败，避免下游渲染出黑图或 500
+  if (!resp || !resp.data || resp.data.length === 0) {
+    throw new Error('Empty image response from server')
+  }
   return new Blob([resp.data] as unknown as BlobPart[], { type: (resp as any).headers?.['content-type'] || 'image/png' })
+}
+
+/**
+ * 安全获取错误的 message 字符串，兼容 unknown / 非 Error 抛出值。
+ * 统一代替 `${error.message}` 的不安全访问（error 类型在严格模式下是 unknown）。
+ */
+export function errorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message
+  if (typeof error === 'string') return error
+  if (error && typeof error === 'object' && 'message' in error) {
+    const m = (error as any).message
+    return typeof m === 'string' ? m : String(error)
+  }
+  return String(error)
 }
 
 export function formatRange(min: number, max: number): string {

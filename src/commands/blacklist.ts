@@ -1,5 +1,6 @@
 import { Context, Logger } from 'koishi'
 import { Config } from '../config'
+import { errorMessage } from '../utils'
 
 const logger = new Logger('memes-blacklist')
 
@@ -64,7 +65,7 @@ export async function apply(ctx: Context, config: Config) {
       await session.send(`✅ 已将关键词 "${keyword}" 从黑名单中移除！相关表情触发词已重新启用。`)
     } catch (error) {
       logger.warn('重新注册命令时出错', error)
-      await session.send(`⚠️ 关键词已从黑名单移除，但重新注册命令时出错: ${error.message}`)
+      await session.send(`⚠️ 关键词已从黑名单移除，但重新注册命令时出错: ${errorMessage(error)}`)
     }
   })
 
@@ -79,7 +80,8 @@ export async function apply(ctx: Context, config: Config) {
   listBlacklistCmd.action(async ({ session }) => {
     if (!session) return
 
-    const blacklistedKeywords = await ctx.$.getBlacklistedKeywords()
+    // 用 Raw 版本保留用户输入的原大小写，便于辨识
+    const blacklistedKeywords = await ctx.$.getBlacklistedKeywordsRaw()
     if (blacklistedKeywords.length === 0) {
       await session.send('📋 黑名单为空，没有被屏蔽的关键词。')
       return

@@ -1,5 +1,6 @@
 import { Context, Logger } from 'koishi'
 import { Config } from '../config'
+import { errorMessage } from '../utils'
 import { getGuildId } from '../types/internal'
 
 const logger = new Logger('memes-guild')
@@ -59,7 +60,7 @@ export async function apply(ctx: Context, config: Config) {
 
     } catch (error) {
       logger.warn('启用群组表情包失败', error)
-      await session.send(`❌ 启用群组表情包失败: ${error.message}`)
+      await session.send(`❌ 启用群组表情包失败: ${errorMessage(error)}`)
     }
   })
 
@@ -102,7 +103,7 @@ export async function apply(ctx: Context, config: Config) {
       await session.send(`✅ 已在${guildDisplay}禁用表情包 "${displayName}" (${memeKey})！`)
     } catch (error) {
       logger.warn('禁用群组表情包失败', error)
-      await session.send(`❌ 禁用群组表情包失败: ${error.message}`)
+      await session.send(`❌ 禁用群组表情包失败: ${errorMessage(error)}`)
     }
   })
 
@@ -164,7 +165,7 @@ export async function apply(ctx: Context, config: Config) {
       await session.send(message.trim())
     } catch (error) {
       logger.warn('获取群组设置失败', error)
-      await session.send(`❌ 获取群组设置失败: ${error.message}`)
+      await session.send(`❌ 获取群组设置失败: ${errorMessage(error)}`)
     }
   })
 }

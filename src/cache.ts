@@ -24,7 +24,15 @@ export interface CacheEntry {
 
 /**
  * 稳定序列化 args：递归对对象 key 排序，并剔除 user_infos
- * （user_infos 是后端填入的昵称/性别，渲染前未知，不计入缓存键）
+ *
+ * 【关于 user_infos 的有意近似】
+ * 调用方（generate.ts/random.ts）在 computeKey 之前已经通过 resolveImagesAndInfos
+ * 拿到了 user_infos（昵称/性别），因此技术上是"已知"的。
+ * 但这里有意将其排除在 cacheKey 之外，理由：
+ *   1. userId 已作为 imageToken 计入 key，同一 userId 在 TTL 内稳定映射到同一头像 URL
+ *   2. 群名片/昵称变更频繁，若计入 key 会使缓存命中率骤降
+ *   3. 代价：用户修改群名片后，TTL 窗口内渲染结果里的昵称仍是旧的（视觉上轻微不一致）
+ * 这是有意的性能 vs 精度权衡，可接受。需要精确刷新时用 meme.cache 清理或等 TTL 到期。
  */
 function stableStringify(value: any, excludeKeys: Set<string> = new Set(['user_infos'])): string {
   if (value === null || typeof value !== 'object') return JSON.stringify(value)
@@ -179,6 +187,7 @@ export class RenderCache {
       (this.opts.maxSize > 0 && this.avatarBytes + incoming > this.opts.maxSize) ||
       (this.opts.maxEntries > 0 && this.avatarCache.size >= this.opts.maxEntries)
     ) {
+      if (this.avatarCache.size === 0) break  // 同 evict() 的边界保护
       const oldest = this.avatarCache.keys().next().value as string | undefined
       if (oldest === undefined) break
       const e = this.avatarCache.get(oldest)
@@ -314,12 +323,19 @@ export class RenderCache {
     return entry
   }
 
-  /** 主动淘汰：保证容量不超限（双限：条数 + 字节） */
+  /**
+   * 主动淘汰：保证容量不超限（双限：条数 + 字节）
+   * 边界保护：若 incoming 本身就超过 maxSize，清空后仍无法满足条件——
+   * 此时停止淘汰，允许写入（但下一次写入会立即淘汰该超大条目）。
+   * 这样避免陷入"清空整个 Map 仍不满足 → 死循环"的边界。
+   */
   private evict(incoming: number): void {
     while (
       (this.opts.maxSize > 0 && this.memBytes + incoming > this.opts.maxSize) ||
       (this.opts.maxEntries > 0 && this.mem.size >= this.opts.maxEntries)
     ) {
+      // 已清空仍不能满足 maxSize：停止淘汰，避免无限循环
+      if (this.mem.size === 0) break
       const oldest = this.mem.keys().next().value as string | undefined
       if (oldest === undefined) break
       const e = this.mem.get(oldest)

@@ -187,14 +187,28 @@ export async function apply(ctx: Context, config: Config) {
       limit(async () => {
         let url: string
         let userInfo: UserInfo
-        if ('src' in info) { url = info.src; userInfo = {} }
-        else if ('userId' in info) { ({ url, userInfo } = await ctx.$.getInfoFromID(session, info.userId)) }
-        else throw new Error('Invalid image info')
+        if ('src' in info) {
+          if (!info.src || typeof info.src !== 'string') {
+            throw new Error(`Invalid image src: ${JSON.stringify(info)}`)
+          }
+          url = info.src; userInfo = {}
+        }
+        else if ('userId' in info) {
+          if (!info.userId) {
+            throw new Error(`Invalid image userId: ${JSON.stringify(info)}`)
+          }
+          ({ url, userInfo } = await ctx.$.getInfoFromID(session, info.userId))
+        }
+        else throw new Error(`Invalid image info: ${JSON.stringify(info)}`)
         // 走头像下载缓存：同一 url 在 TTL 内不重复下载（省 q.qlogo.cn 0.2~1s）
-        imageMap[key] = await ctx.$.renderCache.getAvatar(url, async () =>
+        const blob = await ctx.$.renderCache.getAvatar(url, async () =>
           constructBlobFromFileResp(await ctx.http.file(url)))
+        if (!blob || blob.size === 0) {
+          throw new Error(`Downloaded empty image from ${url}`)
+        }
+        imageMap[key] = blob
         userInfoMap[key] = userInfo
-      })
+      }),
     )
     await Promise.all(tasks)
     // 保持原顺序返回
@@ -202,7 +216,12 @@ export async function apply(ctx: Context, config: Config) {
     const resultUserInfos: UserInfo[] = []
     for (const info of imageInfos) {
       const key = JSON.stringify(info)
-      resultImages.push(imageMap[key])
+      const img = imageMap[key]
+      if (!img) {
+        // 理论上不可达（task 失败会 reject Promise.all），但作为防御性兜底
+        throw new Error(`Image not resolved for ${JSON.stringify(info)}`)
+      }
+      resultImages.push(img)
       resultUserInfos.push(userInfoMap[key])
     }
     return { images: resultImages, userInfos: resultUserInfos, imageInfos }

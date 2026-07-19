@@ -43,13 +43,25 @@ export async function apply(ctx: Context, config: Config) {
       return true
     })
 
-    // 第二步：异步检查黑名单和群组禁用
+    // 第二步：批量拉取群组禁用清单 + 黑名单（各一次查询），在内存中过滤
+    // 避免 N 个候选 × N 次 DB 往返导致随机命令阻塞数秒
+    let disabledMemeKeys: Set<string> | null = null
+    if (guildId !== 'private') {
+      const settings = await ctx.$.getGuildMemeSettings(guildId, platform)
+      disabledMemeKeys = new Set(
+        settings.filter((s: any) => !s.enabled).map((s: any) => s.meme_key.toLowerCase()),
+      )
+    }
+    // 黑名单已有内存缓存（首次后 0 往返）
+    const blacklistedSet = new Set(await ctx.$.getBlacklistedKeywords())
+
     const suitableMemes: typeof rangeFiltered = []
     for (const info of rangeFiltered) {
-      if (await ctx.$.isMemeBlacklisted(info.key, info.keywords)) continue
-      if (guildId !== 'private') {
-        if (!await ctx.$.isMemeGuildEnabled(guildId, platform, info.key)) continue
-      }
+      // 黑名单检查：检查 key 及所有 keywords
+      if (blacklistedSet.has(info.key.toLowerCase())) continue
+      if (info.keywords.some((kw: string) => blacklistedSet.has(kw.toLowerCase()))) continue
+      // 群组禁用检查
+      if (disabledMemeKeys && disabledMemeKeys.has(info.key.toLowerCase())) continue
       suitableMemes.push(info)
     }
 

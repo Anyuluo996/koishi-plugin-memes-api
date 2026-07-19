@@ -36,6 +36,7 @@ export interface MemeInternal {
 
   // 黑名单
   getBlacklistedKeywords(): Promise<string[]>
+  getBlacklistedKeywordsRaw(): Promise<string[]>
   addBlacklistedKeyword(keyword: string): Promise<boolean>
   removeBlacklistedKeyword(keyword: string): Promise<boolean>
   isMemeBlacklisted(memeKey: string, keywords: string[]): Promise<boolean>
@@ -99,7 +100,11 @@ export async function apply(ctx: Context, config: Config) {
       platform: 'string',
       usage_count: 'unsigned',
       last_used: 'timestamp',
-    }, { primary: 'id', autoInc: true, indexes: [['meme_key', 'guild_id', 'user_id', 'platform']] })
+    }, {
+      primary: 'id', autoInc: true,
+      // unique 约束防止并发"查→改/插"模式产生重复记录
+      indexes: [{ keys: ['meme_key', 'guild_id', 'user_id', 'platform'], unique: true }],
+    })
 
     ; (ctx as any).model.extend('memes_guild_settings', {
       id: 'unsigned',
@@ -144,9 +149,14 @@ export async function apply(ctx: Context, config: Config) {
     config.cacheDir,
   )
   // keepCache=false 时启动清空旧渲染缓存文件
-  if (config.renderCacheEnabled && config.renderCachePersist && !config.keepCache) {
+  // 注意：条件不依赖 enabled —— 用户把 enabled 从 true 改为 false 后，
+  // 旧持久化文件也应被清理，避免磁盘累积无用数据
+  if (config.renderCachePersist && !config.keepCache) {
     ctx.$.renderCache.clearDisk()
   }
+
+  // findMeme 查询缓存（必须在 updateInfos 之前声明，避免 TDZ 风险）
+  let findMemeCache: Map<string, MemeInfoResponse> | null = null
 
   ctx.$.updateInfos = async (progressCallback) => {
     const keys = await ctx.$.api.getKeys()
@@ -155,7 +165,8 @@ export async function apply(ctx: Context, config: Config) {
 
     let ok = 0
     const limit = pLimit(config.getInfoConcurrency)
-    const newEntries = await Promise.all(
+    // 使用 allSettled：单个表情 getInfo 失败不阻塞整体，保留已成功的部分
+    const settled = await Promise.allSettled(
       keys.map((key) => {
         return limit(async () => {
           const v = await ctx.$.api.getInfo(key)
@@ -165,14 +176,28 @@ export async function apply(ctx: Context, config: Config) {
         })
       }),
     )
-    
+    const newEntries: Array<readonly [string, MemeInfoResponse]> = []
+    let failed = 0
+    for (const r of settled) {
+      if (r.status === 'fulfilled') {
+        newEntries.push(r.value)
+      } else {
+        failed++
+      }
+    }
+    if (failed > 0) {
+      logger.warn(`updateInfos: ${failed}/${len} memes failed to load, continuing with ${newEntries.length} successes`)
+    }
+    // 全部失败时抛错（让上层 refresh/init 的 catch 处理）
+    if (newEntries.length === 0 && len > 0) {
+      const firstReason = settled.find(r => r.status === 'rejected') as PromiseRejectedResult | undefined
+      throw firstReason?.reason ?? new Error('All meme info fetches failed')
+    }
+
     ctx.$.infos = Object.fromEntries(newEntries)
     // 更新后清除 findMeme 查询缓存
     findMemeCache = null
   }
-
-  // findMeme 查询缓存
-  let findMemeCache: Map<string, MemeInfoResponse> | null = null
 
   const buildFindMemeCache = () => {
     const cache = new Map<string, MemeInfoResponse>()
@@ -250,14 +275,29 @@ export async function apply(ctx: Context, config: Config) {
   }
 
   // === 数据库操作函数 ===
- // 黑名单缓存
+  // 黑名单缓存：统一存储【小写】形式，匹配时一律 toLowerCase 后比较
+  // （黑名单匹配是大小写不敏感的，缓存层即归一化避免调用方重复处理）
   let blacklistCache: Set<string> | null = null
+  // 原始大小写形式（用于 blacklist-list 命令展示用户输入的原值）
+  let blacklistRawCache: string[] | null = null
+
+  // 返回值语义：小写归一化后的数组（用于匹配逻辑）
   ctx.$.getBlacklistedKeywords = async () => {
     if (blacklistCache) return Array.from(blacklistCache)
     const records = await (ctx as any).database.get('memes_blacklist', {})
-    const keywords = records.map((record: any) => record.keyword)
-    blacklistCache = new Set(keywords.map(k => k.toLowerCase()))
-    return keywords
+    const rawKeywords = records.map((record: any) => record.keyword)
+    blacklistRawCache = rawKeywords
+    blacklistCache = new Set(rawKeywords.map(k => k.toLowerCase()))
+    return Array.from(blacklistCache)
+  }
+
+  // 返回数据库原始大小写形式（仅用于显示，如 blacklist-list 命令）
+  ctx.$.getBlacklistedKeywordsRaw = async () => {
+    if (blacklistRawCache) return blacklistRawCache
+    const records = await (ctx as any).database.get('memes_blacklist', {})
+    blacklistRawCache = records.map((record: any) => record.keyword)
+    blacklistCache = new Set(blacklistRawCache.map(k => k.toLowerCase()))
+    return blacklistRawCache
   }
 
   ctx.$.addBlacklistedKeyword = async (keyword: string) => {
@@ -265,28 +305,29 @@ export async function apply(ctx: Context, config: Config) {
     if (existing.length > 0) return false
     await (ctx as any).database.create('memes_blacklist', { keyword })
     blacklistCache = null  // 清除缓存
+    blacklistRawCache = null
     return true
   }
 
   ctx.$.removeBlacklistedKeyword = async (keyword: string) => {
     const result = await (ctx as any).database.remove('memes_blacklist', { keyword })
     blacklistCache = null  // 清除缓存（必须在 return 之前）
+    blacklistRawCache = null
     return result.matched > 0
   }
 
   ctx.$.isMemeBlacklisted = async (memeKey: string, keywords: string[]) => {
-    // 直接使用已缓存的 blacklistSet，避免每次创建新 Set
+    // 直接使用已缓存的小写 Set，避免每次创建新 Set
     if (!blacklistCache) {
-      const blacklistRaw = await ctx.$.getBlacklistedKeywords()
-      blacklistCache = new Set(blacklistRaw.map(k => k.toLowerCase()))
+      await ctx.$.getBlacklistedKeywords()
     }
 
     if (config.debug) {
       logger.info(`[DEBUG] Checking blacklist for key: ${memeKey}, keywords: ${keywords.join(', ')}`)
-      logger.info(`[DEBUG] Current blacklist: ${Array.from(blacklistCache).join(', ')}`)
+      logger.info(`[DEBUG] Current blacklist: ${Array.from(blacklistCache!).join(', ')}`)
     }
 
-    if (blacklistCache.has(memeKey.toLowerCase())) return true
+    if (blacklistCache!.has(memeKey.toLowerCase())) return true
     for (const kw of keywords) {
       if (blacklistCache.has(kw.toLowerCase())) return true
     }
@@ -298,27 +339,19 @@ export async function apply(ctx: Context, config: Config) {
       const guildId = session.guildId || 'private'
       const userId = session.userId
       const platform = session.platform
-      const existing = await (ctx as any).database.get('memes_usage_stats', {
-        meme_key: memeKey,
-        guild_id: guildId,
-        user_id: userId,
-        platform: platform
-      })
-      if (existing.length > 0) {
-        await (ctx as any).database.set('memes_usage_stats', existing[0].id, {
-          usage_count: existing[0].usage_count + 1,
-          last_used: new Date()
-        })
-      } else {
-        await (ctx as any).database.create('memes_usage_stats', {
+      // 原子 upsert：避免"查→改/插"模式在并发下产生重复记录
+      // （配合 memes_usage_stats 上的 unique 索引）
+      await (ctx as any).database.upsert('memes_usage_stats', [
+        {
           meme_key: memeKey,
           guild_id: guildId,
           user_id: userId,
           platform: platform,
-          usage_count: 1,
-          last_used: new Date()
-        })
-      }
+          // 已存在时递增 1（row 代表现有行），新行初始化为 1
+          usage_count: (row: any) => row.usage_count + 1,
+          last_used: new Date(),
+        },
+      ])
     } catch (error) {
       logger.warn('Failed to record meme usage:', error)
     }
@@ -339,7 +372,12 @@ export async function apply(ctx: Context, config: Config) {
   ctx.$.getTopMemes = async (guildId: string | null = null, limit: number = 10) => {
     const query = guildId ? { guild_id: guildId } : {}
     try {
-      const allRecords = await (ctx as any).database.get('memes_usage_stats', query)
+      // 注意：minato 的 groupBy/eval 聚合在部分 driver（memory/mongo）上行为不一致，
+      // 故仍用内存聚合，但只取必要字段（meme_key + usage_count）减小内存压力。
+      // 长期方案：迁移到支持窗口函数的 driver 或定时物化。
+      const allRecords = await (ctx as any).database.get('memes_usage_stats', query, [
+        'meme_key', 'usage_count',
+      ])
       const memeStats = new Map()
       for (const record of allRecords) {
         const current = memeStats.get(record.meme_key) || 0
@@ -450,8 +488,8 @@ export async function apply(ctx: Context, config: Config) {
     }
 
     const shortcuts: { name: string; pattern: string; flags: string; args: string[] }[] = []
-    const blacklistRaw = await ctx.$.getBlacklistedKeywords()
-    const blacklist = new Set(blacklistRaw.map(k => k.toLowerCase()))
+    // getBlacklistedKeywords 已返回小写归一化结果，直接用即可
+    const blacklist = new Set(await ctx.$.getBlacklistedKeywords())
 
     for (const info of Object.values(ctx.$.infos)) {
       if (blacklist.has(info.key.toLowerCase())) continue
