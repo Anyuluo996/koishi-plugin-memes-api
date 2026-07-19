@@ -103,7 +103,17 @@ export async function apply(ctx: Context, config: Config) {
     }, {
       primary: 'id', autoInc: true,
       // unique 约束防止并发"查→改/插"模式产生重复记录
-      indexes: [{ keys: ['meme_key', 'guild_id', 'user_id', 'platform'], unique: true }],
+      // 注意：minato 对 unique 复合索引要求 keys 为对象形式 { field: 'asc' }
+      // （数组形式仅用于非 unique 复合索引）
+      indexes: [{
+        keys: {
+          meme_key: 'asc',
+          guild_id: 'asc',
+          user_id: 'asc',
+          platform: 'asc',
+        },
+        unique: true,
+      }],
     })
 
     ; (ctx as any).model.extend('memes_guild_settings', {

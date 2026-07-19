@@ -289,3 +289,53 @@ describe('refresh.ts 不再重复调用 refreshListImage (H6 回归)', () => {
     expect(matches.length).toBe(1)
   })
 })
+
+// ============================================================
+// M1 回归：验证 memes_usage_stats 的 unique 复合索引使用对象形式
+// （minato 1.x/3.x 要求 unique 复合索引的 keys 必须是对象 {field: 'asc'}，
+//   数组形式会被当作非 unique 复合索引；若误用数组 + unique，
+//   会触发 "missing field definition for index key 0" 运行时错误）
+// ============================================================
+describe('memes_usage_stats unique 复合索引语法 (M1 回归)', () => {
+  const src = fs.readFileSync(
+    path.resolve(__dirname, '../src/index.tsx'),
+    'utf8',
+  )
+
+  it('memes_usage_stats 配置块存在', () => {
+    expect(src).toContain("model.extend('memes_usage_stats'")
+  })
+
+  it('unique 复合索引的 keys 为对象形式（非数组）', () => {
+    // 提取 memes_usage_stats 的 model.extend 配置块
+    const blockMatch = src.match(
+      /model\.extend\('memes_usage_stats'[\s\S]+?\}\s*\)\s*\)/,
+    )
+    expect(blockMatch, '未找到 memes_usage_stats 配置块').not.toBeNull()
+    const block = blockMatch![0]
+
+    // 必须包含 unique: true
+    expect(block).toContain('unique: true')
+
+    // 提取 indexes 数组中的 keys 值
+    // 正确形式：keys: { meme_key: 'asc', ... }
+    // 错误形式：keys: ['meme_key', ...] → 触发 "missing field definition for index key 0"
+    const keysMatch = block.match(/keys:\s*(\[[\s\S]*?\]|\{[\s\S]*?\})/)
+    expect(keysMatch, '未找到 keys 定义').not.toBeNull()
+    const keysValue = keysMatch![1]
+    expect(keysValue.startsWith('{')).toBe(true)
+    expect(keysValue.startsWith('[')).toBe(false)
+
+    // 应包含全部 4 个字段
+    expect(keysValue).toContain('meme_key')
+    expect(keysValue).toContain('guild_id')
+    expect(keysValue).toContain('user_id')
+    expect(keysValue).toContain('platform')
+  })
+
+  it('其他表的索引形式不受影响（guild_settings/user_blocks 仍是数组形式）', () => {
+    // 这两个表是非 unique 索引，数组形式合法
+    expect(src).toContain("indexes: [['guild_id', 'platform', 'meme_key']]")
+    expect(src).toContain("indexes: [['guild_id', 'platform', 'user_id', 'meme_key']]")
+  })
+})
