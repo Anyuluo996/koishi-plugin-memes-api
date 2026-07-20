@@ -1,7 +1,7 @@
 {
   "name": "@anyul/koishi-plugin-memes-api",
   "description": "表情包制作插件调用 API 版",
-  "version": "1.0.54",
+  "version": "1.0.55",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "files": [
@@ -52,8 +52,6 @@
     "webui": "./dist"
   },
   "peerDependencies": {
-    "@cordisjs/element": "^0.3.0",
-    "@cordisjs/plugin-http": "~0.4.2",
     "koishi": "^4.18.10"
   },
   "devDependencies": {
