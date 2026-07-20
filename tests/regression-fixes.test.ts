@@ -333,9 +333,14 @@ describe('memes_usage_stats unique 复合索引语法 (M1 回归)', () => {
     expect(keysValue).toContain('platform')
   })
 
-  it('其他表的索引形式不受影响（guild_settings/user_blocks 仍是数组形式）', () => {
-    // 这两个表是非 unique 索引，数组形式合法
-    expect(src).toContain("indexes: [['guild_id', 'platform', 'meme_key']]")
-    expect(src).toContain("indexes: [['guild_id', 'platform', 'user_id', 'meme_key']]")
+  it('guild_settings/user_blocks 也改为 unique 复合索引（U2 修复后）', () => {
+    // U2 修复：这两张表从非 unique 数组形式改为对象形式 unique 索引
+    // 防止并发"查→改/插"产生重复记录，与 memes_usage_stats 同范式
+    const guildBlock = src.match(/model\.extend\('memes_guild_settings'[\s\S]+?\}\s*\)\s*\)/)
+    const userBlock = src.match(/model\.extend\('memes_user_blocks'[\s\S]+?\}\s*\)\s*\)/)
+    expect(guildBlock).not.toBeNull()
+    expect(userBlock).not.toBeNull()
+    expect(guildBlock![0]).toContain('unique: true')
+    expect(userBlock![0]).toContain('unique: true')
   })
 })

@@ -9,7 +9,9 @@ import { Config } from './config'
 import { RenderCache } from './cache'
 import zhCNLocale from './locales/zh-CN'
 import type { HttpConfig, MemeUsageRecord, GuildSettingRecord, UserBlockRecord } from './types/internal'
+import { getGuildId } from './types/internal'
 import { errorMessage } from './utils'
+import type { ImageFetchInfo } from './cache'
 import * as UserInfo from './user-info'
 
 import type { } from '@koishijs/plugin-help'
@@ -65,13 +67,28 @@ export interface MemeInternal {
   getTopMemes(guildId?: string | null, limit?: number): Promise<any[]>
   findMemeKeyByKeyword(keyword: string): string | null
 
+  /**
+   * 统一的可用性检查接口（S1：消除 generate/random 中分散的三类检查）。
+   * 顺序：黑名单 > 群组禁用 > 用户屏蔽。
+   * 返回 'ok' | 'blacklisted' | 'guild-disabled' | 'user-blocked'。
+   */
+  checkMemeAvailability(
+    session: Session,
+    info: MemeInfoResponse,
+    imageInfos: ImageFetchInfo[],
+  ): Promise<'ok' | 'blacklisted' | 'guild-disabled' | 'user-blocked'>
+
   // 群组管理
   setMemeGuildEnabled(guildId: string, platform: string, memeKey: string, enabled: boolean): Promise<void>
+  /** 删除群组某表情的设置记录（= 恢复默认启用）。返回 matched 数 */
+  removeMemeGuildSetting(guildId: string, platform: string, memeKey: string): Promise<number>
   isMemeGuildEnabled(guildId: string, platform: string, memeKey: string): Promise<boolean>
   getGuildMemeSettings(guildId: string, platform: string): Promise<any[]>
 
   // 用户屏蔽
   setUserMemeBlocked(guildId: string, platform: string, userId: string, memeKey: string, blocked: boolean): Promise<void>
+  /** 解除用户屏蔽（删除记录）。返回 matched 数 */
+  removeUserMemeBlock(guildId: string, platform: string, userId: string, memeKey: string): Promise<number>
   isUserMemeBlocked(guildId: string, platform: string, userId: string, memeKey: string): Promise<boolean>
   getUserMemeBlocks(guildId: string, platform: string, userId?: string): Promise<any[]>
 
@@ -148,7 +165,11 @@ export async function apply(ctx: Context, config: Config) {
       platform: 'string',
       meme_key: 'string',
       enabled: 'boolean',
-    }, { primary: 'id', autoInc: true, indexes: [['guild_id', 'platform', 'meme_key']] })
+    }, {
+      primary: 'id', autoInc: true,
+      // unique 复合索引：防止并发"查→改/插"产生重复记录（与 memes_usage_stats 同范式）
+      indexes: [{ keys: { guild_id: 'asc', platform: 'asc', meme_key: 'asc' }, unique: true }],
+    })
 
     ; (ctx as any).model.extend('memes_user_blocks', {
       id: 'unsigned',
@@ -157,7 +178,11 @@ export async function apply(ctx: Context, config: Config) {
       user_id: 'string',
       meme_key: 'string',
       blocked: 'boolean',
-    }, { primary: 'id', autoInc: true, indexes: [['guild_id', 'platform', 'user_id', 'meme_key']] })
+    }, {
+      primary: 'id', autoInc: true,
+      // unique 复合索引：同上
+      indexes: [{ keys: { guild_id: 'asc', platform: 'asc', user_id: 'asc', meme_key: 'asc' }, unique: true }],
+    })
 
   // === API 初始化 ===
   let httpConfig: HttpConfig
@@ -498,76 +523,208 @@ export async function apply(ctx: Context, config: Config) {
     return null
   }
 
-  ctx.$.setMemeGuildEnabled = async (guildId: string, platform: string, memeKey: string, enabled: boolean) => {
-    const existing = await (ctx as any).database.get('memes_guild_settings', {
-      guild_id: guildId,
-      platform: platform,
-      meme_key: memeKey
-    })
-    if (existing.length > 0) {
-      await (ctx as any).database.set('memes_guild_settings', existing[0].id, { enabled: enabled })
-    } else {
-      await (ctx as any).database.create('memes_guild_settings', {
-        guild_id: guildId,
-        platform: platform,
-        meme_key: memeKey,
-        enabled: enabled
-      })
+  // ============================================================
+  // 群组设置：内存缓存（低频变更、高频读取）
+  // 设计统一为「删除即启用」：
+  // - 禁用：写入 enabled=false 记录
+  // - 启用：删除记录（恢复默认 = 启用）
+  // - 不再有 enabled=true 的记录（避免僵尸数据）
+  // ============================================================
+  // 缓存结构：`${guildId}\0${platform}` → Map<memeKey(lowercase), boolean(enabled)>
+  type GuildSettingsCache = Map<string, Map<string, boolean>>
+  let guildSettingsCache: GuildSettingsCache | null = null
+  let guildSettingsInflight: Promise<GuildSettingsCache> | null = null
+
+  const buildGuildSettingsCache = async (): Promise<GuildSettingsCache> => {
+    const records = await (ctx as any).database.get('memes_guild_settings', {})
+    const cache: GuildSettingsCache = new Map()
+    for (const r of records) {
+      const scopeKey = `${r.guild_id}\0${r.platform}`
+      let inner = cache.get(scopeKey)
+      if (!inner) { inner = new Map(); cache.set(scopeKey, inner) }
+      inner.set(String(r.meme_key).toLowerCase(), !!r.enabled)
     }
+    return cache
+  }
+
+  const ensureGuildSettingsCache = async (): Promise<GuildSettingsCache> => {
+    if (guildSettingsCache) return guildSettingsCache
+    if (guildSettingsInflight) return guildSettingsInflight
+    guildSettingsInflight = (async () => {
+      const result = await buildGuildSettingsCache()
+      guildSettingsCache = result
+      guildSettingsInflight = null
+      return result
+    })()
+    return guildSettingsInflight
+  }
+
+  const invalidateGuildSettingsCache = () => {
+    guildSettingsCache = null
+    guildSettingsInflight = null
+  }
+
+  // 设置群组表情启用状态（写 DB + 更新缓存，原子 upsert）
+  ctx.$.setMemeGuildEnabled = async (guildId: string, platform: string, memeKey: string, enabled: boolean) => {
+    await (ctx as any).database.upsert('memes_guild_settings', [{
+      guild_id: guildId, platform, meme_key: memeKey, enabled,
+    }])
+    // 更新缓存（避免重新查 DB）
+    const cache = await ensureGuildSettingsCache()
+    const scopeKey = `${guildId}\0${platform}`
+    let inner = cache.get(scopeKey)
+    if (!inner) { inner = new Map(); cache.set(scopeKey, inner) }
+    inner.set(memeKey.toLowerCase(), enabled)
+  }
+
+  // 删除群组某表情的设置记录（= 恢复默认启用）
+  ctx.$.removeMemeGuildSetting = async (guildId: string, platform: string, memeKey: string) => {
+    const result = await (ctx as any).database.remove('memes_guild_settings', {
+      guild_id: guildId, platform, meme_key: memeKey,
+    })
+    // 从缓存中移除
+    const cache = await ensureGuildSettingsCache()
+    const scopeKey = `${guildId}\0${platform}`
+    cache.get(scopeKey)?.delete(memeKey.toLowerCase())
+    return result?.matched ?? 0
   }
 
   ctx.$.isMemeGuildEnabled = async (guildId: string, platform: string, memeKey: string) => {
-    const records = await (ctx as any).database.get('memes_guild_settings', {
-      guild_id: guildId,
-      platform: platform,
-      meme_key: memeKey
-    })
-    if (records.length === 0) return true
-    return records[0].enabled
+    const cache = await ensureGuildSettingsCache()
+    const inner = cache.get(`${guildId}\0${platform}`)
+    if (!inner) return true  // 该群无任何设置 = 全部默认启用
+    const v = inner.get(memeKey.toLowerCase())
+    return v === undefined ? true : v  // 无记录 = 启用
   }
 
   ctx.$.getGuildMemeSettings = async (guildId: string, platform: string) => {
+    // 直接读 DB（list 命令需要原始字段，缓存是归一化后的）
     return await (ctx as any).database.get('memes_guild_settings', {
-      guild_id: guildId,
-      platform: platform
+      guild_id: guildId, platform: platform
     })
   }
 
-  ctx.$.setUserMemeBlocked = async (guildId: string, platform: string, userId: string, memeKey: string, blocked: boolean) => {
-    const existing = await (ctx as any).database.get('memes_user_blocks', {
-      guild_id: guildId,
-      platform: platform,
-      user_id: userId,
-      meme_key: memeKey
-    })
-    if (existing.length > 0) {
-      await (ctx as any).database.set('memes_user_blocks', existing[0].id, { blocked: blocked })
-    } else {
-      await (ctx as any).database.create('memes_user_blocks', {
-        guild_id: guildId,
-        platform: platform,
-        user_id: userId,
-        meme_key: memeKey,
-        blocked: blocked
-      })
+  // ============================================================
+  // 用户屏蔽：内存缓存（同上范式）
+  // 设计统一为「删除即未屏蔽」：
+  // - 屏蔽：写入 blocked=true 记录
+  // - 解除：删除记录（恢复默认 = 未屏蔽）
+  // - 不再有 blocked=false 的僵尸数据（U10/S3 修复）
+  // ============================================================
+  // 缓存结构：`${guildId}\0${platform}` → Map<userId(lowercase), Set<memeKey(lowercase)>>
+  type UserBlocksCache = Map<string, Map<string, Set<string>>>
+  let userBlocksCache: UserBlocksCache | null = null
+  let userBlocksInflight: Promise<UserBlocksCache> | null = null
+
+  const buildUserBlocksCache = async (): Promise<UserBlocksCache> => {
+    const records = await (ctx as any).database.get('memes_user_blocks', {})
+    const cache: UserBlocksCache = new Map()
+    for (const r of records) {
+      // 旧数据可能存在 blocked=false 的僵尸记录，构建缓存时忽略它们
+      // （下一次 unblock 改为删除后，僵尸记录会自然消失）
+      if (!r.blocked) continue
+      const scopeKey = `${r.guild_id}\0${r.platform}`
+      let byUser = cache.get(scopeKey)
+      if (!byUser) { byUser = new Map(); cache.set(scopeKey, byUser) }
+      let memes = byUser.get(String(r.user_id).toLowerCase())
+      if (!memes) { memes = new Set(); byUser.set(String(r.user_id).toLowerCase(), memes) }
+      memes.add(String(r.meme_key).toLowerCase())
     }
+    return cache
+  }
+
+  const ensureUserBlocksCache = async (): Promise<UserBlocksCache> => {
+    if (userBlocksCache) return userBlocksCache
+    if (userBlocksInflight) return userBlocksInflight
+    userBlocksInflight = (async () => {
+      const result = await buildUserBlocksCache()
+      userBlocksCache = result
+      userBlocksInflight = null
+      return result
+    })()
+    return userBlocksInflight
+  }
+
+  const invalidateUserBlocksCache = () => {
+    userBlocksCache = null
+    userBlocksInflight = null
+  }
+
+  // 屏蔽用户（type='block'，原子 upsert）
+  ctx.$.setUserMemeBlocked = async (guildId: string, platform: string, userId: string, memeKey: string, _blocked: boolean) => {
+    // _blocked 参数保留以兼容旧签名；新设计统一为「屏蔽=写入true，解除=删除」
+    // 若传入 false，视为解除屏蔽（删除记录）
+    if (!_blocked) {
+      await ctx.$.removeUserMemeBlock(guildId, platform, userId, memeKey)
+      return
+    }
+    await (ctx as any).database.upsert('memes_user_blocks', [{
+      guild_id: guildId, platform, user_id: userId, meme_key: memeKey, blocked: true,
+    }])
+    // 更新缓存
+    const cache = await ensureUserBlocksCache()
+    const scopeKey = `${guildId}\0${platform}`
+    let byUser = cache.get(scopeKey)
+    if (!byUser) { byUser = new Map(); cache.set(scopeKey, byUser) }
+    let memes = byUser.get(userId.toLowerCase())
+    if (!memes) { memes = new Set(); byUser.set(userId.toLowerCase(), memes) }
+    memes.add(memeKey.toLowerCase())
+  }
+
+  // 解除屏蔽（删除记录）
+  ctx.$.removeUserMemeBlock = async (guildId: string, platform: string, userId: string, memeKey: string) => {
+    const result = await (ctx as any).database.remove('memes_user_blocks', {
+      guild_id: guildId, platform, user_id: userId, meme_key: memeKey,
+    })
+    // 从缓存中移除
+    const cache = await ensureUserBlocksCache()
+    cache.get(`${guildId}\0${platform}`)?.get(userId.toLowerCase())?.delete(memeKey.toLowerCase())
+    return result?.matched ?? 0
   }
 
   ctx.$.isUserMemeBlocked = async (guildId: string, platform: string, userId: string, memeKey: string) => {
-    const records = await (ctx as any).database.get('memes_user_blocks', {
-      guild_id: guildId,
-      platform: platform,
-      user_id: userId,
-      meme_key: memeKey
-    })
-    if (records.length === 0) return false
-    return records[0].blocked
+    const cache = await ensureUserBlocksCache()
+    const byUser = cache.get(`${guildId}\0${platform}`)
+    if (!byUser) return false
+    return byUser.get(userId.toLowerCase())?.has(memeKey.toLowerCase()) ?? false
   }
 
   ctx.$.getUserMemeBlocks = async (guildId: string, platform: string, userId?: string) => {
+    // list 命令用，直接读 DB 拿原始字段
     const query: any = { guild_id: guildId, platform: platform }
     if (userId) query.user_id = userId
     return await (ctx as any).database.get('memes_user_blocks', query)
+  }
+
+  // ============================================================
+  // S1：统一的可用性检查接口（generate/random 共用）
+  // 顺序：黑名单 > 群组禁用 > 用户屏蔽
+  // 注：本接口适合 generate 单表情检查；random 的批量过滤仍各自优化（避免 N 次 await）
+  // ============================================================
+  ctx.$.checkMemeAvailability = async (session, info, imageInfos: ImageFetchInfo[]) => {
+    const guildId = getGuildId(session)
+    const platform = session.platform
+
+    // 1. 黑名单（按表情粒度兜底）
+    if (await ctx.$.isMemeBlacklisted(info.key, info.keywords)) return 'blacklisted'
+
+    // 2. 群组禁用（仅群聊场景）
+    if (guildId !== 'private') {
+      if (!(await ctx.$.isMemeGuildEnabled(guildId, platform, info.key))) return 'guild-disabled'
+    }
+
+    // 3. 用户屏蔽（仅群聊场景；跳过发送者自己，避免用户屏蔽自己后无法使用表情）
+    if (guildId !== 'private') {
+      for (const item of imageInfos) {
+        if (!('userId' in item) || !item.userId) continue
+        if (item.userId === session.userId) continue  // 故意跳过自己（U8：避免自我屏蔽死锁）
+        if (await ctx.$.isUserMemeBlocked(guildId, platform, item.userId, info.key)) {
+          return 'user-blocked'
+        }
+      }
+    }
+
+    return 'ok'
   }
 
   // === 🔴 这里删除了 reRegisterGenerateCommands 的定义，因为它在 generate.ts 中定义 ===

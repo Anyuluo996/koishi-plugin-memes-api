@@ -52,16 +52,23 @@ export async function apply(ctx: Context, config: Config) {
         settings.filter((s: any) => !s.enabled).map((s: any) => s.meme_key.toLowerCase()),
       )
     }
-    // 黑名单已有内存缓存（首次后 0 往返）
-    const blacklistedSet = new Set(await ctx.$.getBlacklistedKeywords())
+    // 黑名单：同时取 memes（整体禁用）和 keywords（单触发词禁用）两类
+    // 语义与 isMemeBlacklisted 保持一致：
+    // - key 在 memes 黑名单 → 整个禁用
+    // - 所有关键词都在 keywords 黑名单（无可用触发词）→ 整个禁用
+    const blacklistedMemes = new Set((await ctx.$.getBlacklistedMemes()).map(k => k.toLowerCase()))
+    const blacklistedKeywords = new Set((await ctx.$.getBlacklistedKeywords()).map(k => k.toLowerCase()))
 
     const suitableMemes: typeof rangeFiltered = []
     for (const info of rangeFiltered) {
-      // 黑名单检查：检查 key 及所有 keywords
-      if (blacklistedSet.has(info.key.toLowerCase())) continue
-      if (info.keywords.some((kw: string) => blacklistedSet.has(kw.toLowerCase()))) continue
+      const keyLower = info.key.toLowerCase()
+      // meme 类型整体禁用
+      if (blacklistedMemes.has(keyLower)) continue
+      // 所有关键词被拉黑 → 无可用触发词 → 整体禁用
+      if (info.keywords.length > 0 &&
+          info.keywords.every(kw => blacklistedKeywords.has(kw.toLowerCase()))) continue
       // 群组禁用检查
-      if (disabledMemeKeys && disabledMemeKeys.has(info.key.toLowerCase())) continue
+      if (disabledMemeKeys && disabledMemeKeys.has(keyLower)) continue
       suitableMemes.push(info)
     }
 
@@ -82,7 +89,8 @@ export async function apply(ctx: Context, config: Config) {
       const info = suitableMemes[index]
       suitableMemes.splice(index, 1)
 
-      // 用户屏蔽检查（使用原始 imageInfos 获取 userId）
+      // 用户屏蔽检查（跳过自己：U8 设计决策，避免自我屏蔽死锁）
+      // U5/S2 修复后：isUserMemeBlocked 走内存缓存，不再每次查 DB
       if (guildId !== 'private') {
         let blocked = false
         for (let i = 0; i < resolvedImageInfos.length; i++) {

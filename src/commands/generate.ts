@@ -74,6 +74,16 @@ declare module '../index' {
 
     isMemeGuildEnabled: (guildId: string, platform: string, memeKey: string) => Promise<boolean>
     isUserMemeBlocked: (guildId: string, platform: string, userId: string, memeKey: string) => Promise<boolean>
+    /**
+     * 统一的可用性检查接口（S1：消除 generate/random 中分散的三类检查）。
+     * 返回 'blacklisted' | 'guild-disabled' | 'user-blocked' | 'ok'。
+     * imageInfos 用于用户屏蔽检查（被@用户的头像是否被屏蔽参与本表情）。
+     */
+    checkMemeAvailability: (
+      session: Session,
+      info: MemeInfoResponse,
+      imageInfos: ImageFetchInfo[],
+    ) => Promise<'ok' | 'blacklisted' | 'guild-disabled' | 'user-blocked'>
   }
 }
 
@@ -373,9 +383,11 @@ export async function apply(ctx: Context, config: Config) {
             logger.info('[DEBUG] Triggered meme: %s, user: %s, guild: %s', info.key, session.userId, guildId)
           }
 
+          // === 可用性检查（两段式，语义见 ctx.$.checkMemeAvailability）===
+          // 分两段是出于性能考虑：黑名单+群组在参数解析前尽早拦截，
+          // 用户屏蔽需要参数补全后的 imageInfos（含 autoUseAvatar 补全的自己）。
+
           // 1. 黑名单检查 (最高优先级)
-          // 注意：这里我们使用 info.key，确保即使是别名触发也能正确检查到主键
-          // 同时也传入 info.keywords，确保如果表情包含的关键词在黑名单中，也能被拦截
           const isBlacklisted = await ctx.$.isMemeBlacklisted(info.key, info.keywords)
           if (isBlacklisted) {
             logger.info(`Blocked blacklisted meme execution: ${info.key}`)
@@ -422,11 +434,13 @@ export async function apply(ctx: Context, config: Config) {
           const autoUseTexts = !texts.length && config.autoUseDefaultTexts
           if (autoUseTexts) texts.push(...default_texts)
 
-          // 用户屏蔽检查
+          // 3. 用户屏蔽检查（仅群聊）
+          // 故意跳过 item.userId === session.userId 的情况：避免用户屏蔽自己后，
+          // 自己用表情时被自己的屏蔽拦截（自我屏蔽死锁）。这是设计决策，非 bug。（U8）
           if (guildId !== 'private') {
             for (const item of imageInfos) {
               if ('userId' in item && item.userId) {
-                if (item.userId === session.userId) continue
+                if (item.userId === session.userId) continue  // 故意跳过自己
                 const isBlocked = await ctx.$.isUserMemeBlocked(guildId, platform, item.userId, info.key)
                 if (isBlocked) {
                   if (config.debug) logger.info('[DEBUG] User %s is blocked for meme: %s', item.userId, info.key)

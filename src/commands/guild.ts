@@ -40,19 +40,13 @@ export async function apply(ctx: Context, config: Config) {
     const displayName = memeInfo.keywords[0] || memeKey
 
     try {
-      // 🚨 修改点：不再设置为 true，而是直接删除记录
-      // 逻辑：默认是开启的，如果有"禁用"记录存在，我们把它删了就等于开启了（恢复默认）。
-      // 这样 guild-list 就不会显示这个表情了。
-      const db = (ctx as any).database
-      const removed = await db.remove('memes_guild_settings', {
-        guild_id: targetGuildId,
-        platform: platform,
-        meme_key: memeKey
-      })
+      // 启用 = 删除记录（恢复默认 = 启用）。统一语义，避免 enabled=true 僵尸数据（U3）。
+      // 通过缓存的 removeMemeGuildSetting 同步失效内存缓存
+      const matched = await ctx.$.removeMemeGuildSetting(targetGuildId, platform, memeKey)
 
       const guildDisplay = guildId ? `群组 ${targetGuildId}` : '当前群组'
 
-      if (removed.matched && removed.matched > 0) {
+      if (matched > 0) {
         await session.send(`✅ 已在${guildDisplay}启用（恢复默认）表情包 "${displayName}" (${memeKey})！`)
       } else {
         await session.send(`ℹ️ 表情包 "${displayName}" 在${guildDisplay}本身就是启用状态。`)
@@ -136,29 +130,34 @@ export async function apply(ctx: Context, config: Config) {
         return
       }
 
-      // 现在这里过滤出的主要是被显式禁用的表情
+      // 已禁用的表情（U3 修复后，启用 = 删除记录，所以这里只有 disabled 项）
       const disabledMemes = settings.filter(s => !s.enabled)
-
-      // 只有当我们使用了 "先删库后加库" 的 enabled 逻辑，数据库里才会留下 enabled=true 的记录
-      // 如果按上面的"删除即启用"逻辑，enabledMemes 这里应该是空的（或者遗留数据）
-      const enabledMemes = settings.filter(s => s.enabled)
+      // enabled=true 的遗留记录（旧版本产物，新版本不再写入）
+      const legacyEnabled = settings.filter(s => s.enabled)
 
       const guildDisplay = guildId ? `群组 ${targetGuildId}` : '当前群组'
+      const formatEntry = (s: any) => {
+        // U9：显示关键词（可读）+ key（精确），而非纯 key
+        const info = ctx.$.infos[s.meme_key]
+        return info ? `• ${info.keywords[0] || s.meme_key} (${s.meme_key})` : `• ${s.meme_key}`
+      }
+
       let message = `📋 ${guildDisplay}的表情包设置:\n\n`
 
       if (disabledMemes.length > 0) {
         message += `❌ 已禁用 (${disabledMemes.length} 个):\n`
-        message += disabledMemes.map(s => `• ${s.meme_key}`).join('\n')
+        message += disabledMemes.map(formatEntry).join('\n')
         message += '\n'
       }
 
-      // 如果数据库里还有遗留的 enabled=true 记录，顺便显示出来，或者你可以不显示
-      if (enabledMemes.length > 0) {
-        message += `\n⚠️ 特殊启用记录 (建议通过"启用表情"指令清理):\n`
-        message += enabledMemes.map(s => `• ${s.meme_key}`).join('\n')
+      if (legacyEnabled.length > 0) {
+        // 旧数据残留：建议管理员用 enable-guild 命令逐个清理
+        message += `\n⚠️ 旧版启用记录 (${legacyEnabled.length} 个，建议用"启用表情"指令清理):\n`
+        message += legacyEnabled.map(formatEntry).join('\n')
+        message += '\n'
       }
 
-      if (disabledMemes.length === 0 && enabledMemes.length === 0) {
+      if (disabledMemes.length === 0 && legacyEnabled.length === 0) {
          message = `📋 ${guildDisplay}没有特殊的表情包设置（所有表情包默认均为启用状态）。`
       }
 
