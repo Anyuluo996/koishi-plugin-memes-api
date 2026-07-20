@@ -276,8 +276,9 @@ export async function apply(ctx: Context, config: Config) {
     generateSubCommands.length = 0
 
     const registeredNames = new Set<string>()
-    const blacklistRaw = await ctx.$.getBlacklistedKeywords()
-    const blacklist = new Set(blacklistRaw.map(k => k.toLowerCase()))
+    // 两类黑名单：meme 整体禁用、keyword 单触发词禁用
+    const blacklistedMemes = new Set((await ctx.$.getBlacklistedMemes()).map(k => k.toLowerCase()))
+    const blacklistedKeywords = new Set((await ctx.$.getBlacklistedKeywords()).map(k => k.toLowerCase()))
     logger.info(`Starting to register ${Object.keys(ctx.$.infos).length} memes...`)
 
     // 2. 预处理：解决关键词冲突 (index.tsx 中的高级逻辑)
@@ -308,8 +309,8 @@ export async function apply(ctx: Context, config: Config) {
 
     // 3. 注册命令
     for (const info of Object.values(ctx.$.infos)) {
-      // 检查 key 是否在黑名单中 (全局禁用该表情)
-      if (blacklist.has(info.key.toLowerCase())) {
+      // 检查 key 是否在 meme 黑名单中（整体禁用该表情）
+      if (blacklistedMemes.has(info.key.toLowerCase())) {
         logger.info(`Skip registering blacklisted meme: ${info.key}`)
         continue
       }
@@ -320,24 +321,31 @@ export async function apply(ctx: Context, config: Config) {
         continue
       }
 
-      // 注册子命令
-      const subCmd = (cmdGenerate as any).subcommand(`.${info.key} [args:el]`, (info as any).description || `生成${info.key}表情包`, { strictOptions: true, hidden: true })
-      registeredNames.add(info.key)
-
       // 获取处理过冲突的关键词列表
       const resolvedKws = resolvedKeywordsMap.get(info.key) || info.keywords
 
-      // 过滤掉：1.黑名单中的词 2.本次已经注册过的词
+      // 过滤掉：1.keyword 黑名单中的词 2.本次已经注册过的词
       const validKeywords = resolvedKws.filter((kw: string) => {
-        if (blacklist.has(kw.toLowerCase())) return false
+        if (blacklistedKeywords.has(kw.toLowerCase())) return false
         if (registeredNames.has(kw)) return false
         return true
       })
 
+      // 如果所有关键词都被拉黑（且 key 本身不在 meme 黑名单），
+      // 表情已无可用触发词，跳过注册（与运行时 isMemeBlacklisted 语义一致）
+      if (resolvedKws.length > 0 && validKeywords.length === 0) {
+        logger.info(`Skip registering meme "${info.key}": all keywords blacklisted`)
+        continue
+      }
+
+      // 注册子命令
+      const subCmd = (cmdGenerate as any).subcommand(`.${info.key} [args:el]`, (info as any).description || `生成${info.key}表情包`, { strictOptions: true, hidden: true })
+      registeredNames.add(info.key)
+
       // 记录这些关键词已被占用
       validKeywords.forEach((kw: string) => registeredNames.add(kw))
 
-      const blockedKeywords = resolvedKws.filter((kw: string) => blacklist.has(kw.toLowerCase()))
+      const blockedKeywords = resolvedKws.filter((kw: string) => blacklistedKeywords.has(kw.toLowerCase()))
       if (blockedKeywords.length > 0) {
         logger.info(`表情 "${info.key}" 的以下关键词已被黑名单过滤: ${blockedKeywords.join(', ')}`)
       }

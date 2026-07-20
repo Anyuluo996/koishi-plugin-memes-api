@@ -9,6 +9,7 @@ import { Config } from './config'
 import { RenderCache } from './cache'
 import zhCNLocale from './locales/zh-CN'
 import type { HttpConfig, MemeUsageRecord, GuildSettingRecord, UserBlockRecord } from './types/internal'
+import { errorMessage } from './utils'
 import * as UserInfo from './user-info'
 
 import type { } from '@koishijs/plugin-help'
@@ -35,10 +36,28 @@ export interface MemeInternal {
   findMeme(query: string): MemeInfoResponse | undefined
 
   // 黑名单
+  /** 获取被拉黑的表情 key 列表（小写归一化，type='meme'） */
+  getBlacklistedMemes(): Promise<string[]>
+  /** 获取被拉黑的关键词列表（小写归一化，type='keyword'） */
   getBlacklistedKeywords(): Promise<string[]>
-  getBlacklistedKeywordsRaw(): Promise<string[]>
+  /** 获取全部黑名单条目（原始大小写 + type，用于显示） */
+  getBlacklistEntries(): Promise<Array<{ keyword: string; type: string }>>
+  /** 拉黑整个表情（type='meme'）。返回 false 表示已存在 */
+  addBlacklistedMeme(keyword: string): Promise<boolean>
+  /** 拉黑单个触发词（type='keyword'）。返回 false 表示已存在 */
   addBlacklistedKeyword(keyword: string): Promise<boolean>
-  removeBlacklistedKeyword(keyword: string): Promise<boolean>
+  /**
+   * 移除黑名单条目（大小写不敏感）。
+   * - type 提供：仅移除该类型
+   * - type 省略：移除该 keyword 的所有类型条目
+   * 返回是否实际移除了记录
+   */
+  removeBlacklistedEntry(keyword: string, type?: 'meme' | 'keyword'): Promise<boolean>
+  /**
+   * 运行时拦截判断：整个表情是否被禁用。
+   * - 表情 key 在 meme 黑名单 → true
+   * - 表情所有 keywords 都在 keyword 黑名单（无可用触发词）→ true
+   */
   isMemeBlacklisted(memeKey: string, keywords: string[]): Promise<boolean>
 
   recordMemeUsage(session: Session, memeKey: string): Promise<void>
@@ -90,7 +109,14 @@ export async function apply(ctx: Context, config: Config) {
     ; (ctx as any).model.extend('memes_blacklist', {
       id: 'unsigned',
       keyword: 'string',
-    }, { primary: 'id', autoInc: true, indexes: [{ keys: { keyword: 'asc' }, unique: true }] })
+      // 拉黑类型：'meme' = 整个表情禁用；'keyword' = 仅该触发词的别名/快捷指令禁用
+      // 旧数据无 type 字段时，读取层自动视为 'meme'（保留旧行为）
+      type: 'string',
+    }, {
+      primary: 'id', autoInc: true,
+      // 复合 unique：(keyword, type) 组合唯一。允许同 keyword 同时存在 meme 和 keyword 两条记录
+      indexes: [{ keys: { keyword: 'asc', type: 'asc' }, unique: true }],
+    })
 
     ; (ctx as any).model.extend('memes_usage_stats', {
       id: 'unsigned',
@@ -276,7 +302,7 @@ export async function apply(ctx: Context, config: Config) {
 
   ctx.$.invalidateAllCaches = () => {
     findMemeCache = null
-    blacklistCache = null
+    invalidateBlacklistCache()
     // 删除旧的表情列表图片
     try {
       const imgPath = path.resolve(config.cacheDir, LIST_IMAGE_NAME)
@@ -285,62 +311,123 @@ export async function apply(ctx: Context, config: Config) {
   }
 
   // === 数据库操作函数 ===
-  // 黑名单缓存：统一存储【小写】形式，匹配时一律 toLowerCase 后比较
-  // （黑名单匹配是大小写不敏感的，缓存层即归一化避免调用方重复处理）
-  let blacklistCache: Set<string> | null = null
-  // 原始大小写形式（用于 blacklist-list 命令展示用户输入的原值）
-  let blacklistRawCache: string[] | null = null
+  // 黑名单缓存：分两个 Set 存储，均【小写归一化】
+  // - memesSet: type='meme' 的条目（整个表情禁用）
+  // - keywordsSet: type='keyword' 的条目（仅该触发词禁用）
+  // 旧数据无 type 字段时，读取层视为 'meme'（保留旧行为）
+  type BlacklistCache = { memes: Set<string>; keywords: Set<string>; raw: Array<{ keyword: string; type: string }> }
+  let blacklistCache: BlacklistCache | null = null
+  // inflight 防止冷启动并发击穿（对齐 RenderCache.dedup 范式）
+  let blacklistInflight: Promise<BlacklistCache> | null = null
 
-  // 返回值语义：小写归一化后的数组（用于匹配逻辑）
+  const buildBlacklistCache = async (): Promise<BlacklistCache> => {
+    const records = await (ctx as any).database.get('memes_blacklist', {})
+    const memes = new Set<string>()
+    const keywords = new Set<string>()
+    const raw: Array<{ keyword: string; type: string }> = []
+    for (const record of records) {
+      // 旧数据无 type → 视为 'meme'（保留旧行为：拉黑 = 整个禁用）
+      const type = record.type === 'keyword' ? 'keyword' : 'meme'
+      const lower = String(record.keyword).toLowerCase()
+      raw.push({ keyword: record.keyword, type })
+      if (type === 'meme') memes.add(lower)
+      else keywords.add(lower)
+    }
+    return { memes, keywords, raw }
+  }
+
+  const ensureBlacklistCache = async (): Promise<BlacklistCache> => {
+    if (blacklistCache) return blacklistCache
+    if (blacklistInflight) return blacklistInflight
+    blacklistInflight = (async () => {
+      const result = await buildBlacklistCache()
+      blacklistCache = result
+      blacklistInflight = null
+      return result
+    })()
+    return blacklistInflight
+  }
+
+  const invalidateBlacklistCache = () => {
+    blacklistCache = null
+    blacklistInflight = null
+  }
+
+  ctx.$.getBlacklistedMemes = async () => {
+    const cache = await ensureBlacklistCache()
+    return Array.from(cache.memes)
+  }
+
   ctx.$.getBlacklistedKeywords = async () => {
-    if (blacklistCache) return Array.from(blacklistCache)
-    const records = await (ctx as any).database.get('memes_blacklist', {})
-    const rawKeywords = records.map((record: any) => record.keyword)
-    blacklistRawCache = rawKeywords
-    blacklistCache = new Set(rawKeywords.map(k => k.toLowerCase()))
-    return Array.from(blacklistCache)
+    const cache = await ensureBlacklistCache()
+    return Array.from(cache.keywords)
   }
 
-  // 返回数据库原始大小写形式（仅用于显示，如 blacklist-list 命令）
-  ctx.$.getBlacklistedKeywordsRaw = async () => {
-    if (blacklistRawCache) return blacklistRawCache
-    const records = await (ctx as any).database.get('memes_blacklist', {})
-    blacklistRawCache = records.map((record: any) => record.keyword)
-    blacklistCache = new Set(blacklistRawCache.map(k => k.toLowerCase()))
-    return blacklistRawCache
+  ctx.$.getBlacklistEntries = async () => {
+    const cache = await ensureBlacklistCache()
+    return cache.raw
   }
 
-  ctx.$.addBlacklistedKeyword = async (keyword: string) => {
-    const existing = await (ctx as any).database.get('memes_blacklist', { keyword })
-    if (existing.length > 0) return false
-    await (ctx as any).database.create('memes_blacklist', { keyword })
-    blacklistCache = null  // 清除缓存
-    blacklistRawCache = null
+  /** 添加黑名单条目的通用实现，按 type 区分；unique 冲突视为幂等成功 */
+  const addBlacklistEntry = async (keyword: string, type: 'meme' | 'keyword'): Promise<boolean> => {
+    try {
+      await (ctx as any).database.create('memes_blacklist', { keyword, type })
+      invalidateBlacklistCache()
+      return true
+    } catch (e: any) {
+      // unique 冲突（同 keyword+type 已存在）→ 幂等返回 false
+      // 不同 driver 报错信息不一致，宽松判断
+      const msg = errorMessage(e).toLowerCase()
+      if (msg.includes('unique') || msg.includes('duplicate') || msg.includes('constraint')) {
+        return false
+      }
+      throw e
+    }
+  }
+
+  ctx.$.addBlacklistedMeme = (keyword: string) => addBlacklistEntry(keyword, 'meme')
+  ctx.$.addBlacklistedKeyword = (keyword: string) => addBlacklistEntry(keyword, 'keyword')
+
+  ctx.$.removeBlacklistedEntry = async (keyword: string, type?: 'meme' | 'keyword') => {
+    // 大小写不敏感删除：先查出所有记录过滤，再按 id 删
+    // （minato 默认字符串相等是大小写敏感的，直接 remove({keyword}) 会漏掉大小写不同的条目）
+    const records = await (ctx as any).database.get('memes_blacklist', {})
+    const lower = keyword.toLowerCase()
+    const toDelete = records.filter((r: any) => {
+      if (String(r.keyword).toLowerCase() !== lower) return false
+      if (type) {
+        const rType = r.type === 'keyword' ? 'keyword' : 'meme'
+        return rType === type
+      }
+      return true
+    })
+    if (toDelete.length === 0) return false
+    await (ctx as any).database.remove('memes_blacklist', { id: toDelete.map((r: any) => r.id) })
+    invalidateBlacklistCache()
     return true
   }
 
-  ctx.$.removeBlacklistedKeyword = async (keyword: string) => {
-    const result = await (ctx as any).database.remove('memes_blacklist', { keyword })
-    blacklistCache = null  // 清除缓存（必须在 return 之前）
-    blacklistRawCache = null
-    return result.matched > 0
-  }
-
   ctx.$.isMemeBlacklisted = async (memeKey: string, keywords: string[]) => {
-    // 直接使用已缓存的小写 Set，避免每次创建新 Set
-    if (!blacklistCache) {
-      await ctx.$.getBlacklistedKeywords()
-    }
+    const cache = await ensureBlacklistCache()
+    const keyLower = memeKey.toLowerCase()
 
     if (config.debug) {
       logger.info(`[DEBUG] Checking blacklist for key: ${memeKey}, keywords: ${keywords.join(', ')}`)
-      logger.info(`[DEBUG] Current blacklist: ${Array.from(blacklistCache!).join(', ')}`)
+      logger.info(`[DEBUG] Blacklisted memes: ${Array.from(cache.memes).join(', ')}`)
+      logger.info(`[DEBUG] Blacklisted keywords: ${Array.from(cache.keywords).join(', ')}`)
     }
 
-    if (blacklistCache!.has(memeKey.toLowerCase())) return true
-    for (const kw of keywords) {
-      if (blacklistCache.has(kw.toLowerCase())) return true
-    }
+    // 1. 表情 key 在 meme 黑名单 → 整个禁用
+    if (cache.memes.has(keyLower)) return true
+
+    // 2. 若 keywords 为空（仅有 key），仅按 key 判断
+    if (keywords.length === 0) return false
+
+    // 3. 所有触发词都在 keyword 黑名单（无可用触发词）→ 整个禁用
+    //    部分被拉黑时，剩余触发词仍可使用（符合用户预期）
+    const allKeywordsBlacklisted = keywords.every(kw => cache.keywords.has(kw.toLowerCase()))
+    if (allKeywordsBlacklisted) return true
+
     return false
   }
 
@@ -498,14 +585,18 @@ export async function apply(ctx: Context, config: Config) {
     }
 
     const shortcuts: { name: string; pattern: string; flags: string; args: string[] }[] = []
-    // getBlacklistedKeywords 已返回小写归一化结果，直接用即可
-    const blacklist = new Set(await ctx.$.getBlacklistedKeywords())
+    // 同时拉取两类黑名单：meme（整个表情禁用）和 keyword（仅该触发词禁用）
+    const blacklistedMemes = new Set(await ctx.$.getBlacklistedMemes())
+    const blacklistedKeywords = new Set(await ctx.$.getBlacklistedKeywords())
 
     for (const info of Object.values(ctx.$.infos)) {
-      if (blacklist.has(info.key.toLowerCase())) continue
+      // 表情整体被拉黑 → 跳过所有快捷指令
+      if (blacklistedMemes.has(info.key.toLowerCase())) continue
 
       // 关键词快捷方式（转成正则表达式）
       for (const keyword of info.keywords) {
+        // 单个关键词被拉黑 → 该关键词不注册快捷指令（其他关键词仍生效）
+        if (blacklistedKeywords.has(keyword.toLowerCase())) continue
         shortcuts.push({
           name: info.key,
           pattern: escapeRegExp(keyword),
