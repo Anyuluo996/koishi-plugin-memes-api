@@ -461,19 +461,35 @@ export async function apply(ctx: Context, config: Config) {
       const guildId = session.guildId || 'private'
       const userId = session.userId
       const platform = session.platform
-      // 原子 upsert：避免"查→改/插"模式在并发下产生重复记录
-      // （配合 memes_usage_stats 上的 unique 索引）
-      await (ctx as any).database.upsert('memes_usage_stats', [
-        {
-          meme_key: memeKey,
-          guild_id: guildId,
-          user_id: userId,
-          platform: platform,
-          // 已存在时递增 1（row 代表现有行），新行初始化为 1
-          usage_count: (row: any) => row.usage_count + 1,
-          last_used: new Date(),
-        },
-      ])
+
+      // 读-改-写 + 重试：兼容所有 driver（SQLite 不支持 upsert 的函数值表达式）
+      // 配合 memes_usage_stats 上的 unique 索引，并发场景下最多重试 2 次
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const existing = await (ctx as any).database.get('memes_usage_stats', {
+          meme_key: memeKey, guild_id: guildId, user_id: userId, platform,
+        })
+        if (existing.length > 0) {
+          await (ctx as any).database.set('memes_usage_stats', existing[0].id, {
+            usage_count: (existing[0].usage_count || 0) + 1,
+            last_used: new Date(),
+          })
+          return
+        }
+        try {
+          await (ctx as any).database.create('memes_usage_stats', {
+            meme_key: memeKey, guild_id: guildId, user_id: userId,
+            platform, usage_count: 1, last_used: new Date(),
+          })
+          return
+        } catch (createErr) {
+          // 并发场景：另一个请求已创建 → 下一轮循环走 set 分支
+          const msg = errorMessage(createErr).toLowerCase()
+          if (msg.includes('unique') || msg.includes('duplicate') || msg.includes('constraint')) {
+            continue
+          }
+          throw createErr
+        }
+      }
     } catch (error) {
       logger.warn('Failed to record meme usage:', error)
     }

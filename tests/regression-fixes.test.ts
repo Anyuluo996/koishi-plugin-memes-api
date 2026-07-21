@@ -344,3 +344,49 @@ describe('memes_usage_stats unique 复合索引语法 (M1 回归)', () => {
     expect(userBlock![0]).toContain('unique: true')
   })
 })
+
+// ============================================================
+// M1-2: recordMemeUsage 不使用 upsert 函数值表达式（SQLite 兼容性回归）
+//
+// 上次 M1 修复用了 `upsert(..., [{ usage_count: (row) => row.x + 1 }])`，
+// SQLite driver 报错："tried to bind a value of an unknown type ((row) => ...)"
+// 修复方案：改用「读-改-写」+ 重试，所有 driver 通用
+// ============================================================
+describe('recordMemeUsage SQLite 兼容性 (M1-2 回归)', () => {
+  const src = fs.readFileSync(
+    path.resolve(__dirname, '../src/index.tsx'),
+    'utf8',
+  )
+
+  it('recordMemeUsage 不再使用 upsert（改用读-改-写）', () => {
+    // 提取 recordMemeUsage 函数体
+    const fnMatch = src.match(/recordMemeUsage = async[\s\S]+?\n  \}/)
+    expect(fnMatch, '未找到 recordMemeUsage 函数').not.toBeNull()
+    const fnBody = fnMatch![0]
+    // 不应包含 upsert（SQLite 不支持其函数值表达式）
+    expect(fnBody).not.toMatch(/database\.upsert\('memes_usage_stats'/)
+  })
+
+  it('recordMemeUsage 不再使用函数值表达式 (row) => row.x + 1', () => {
+    const fnMatch = src.match(/recordMemeUsage = async[\s\S]+?\n  \}/)
+    const fnBody = fnMatch![0]
+    // 关键防回归：禁止出现 row => 这种 SQLite 不支持的 upsert 函数值
+    expect(fnBody).not.toMatch(/\(row[^)]*\)\s*=>\s*row\./)
+  })
+
+  it('recordMemeUsage 使用读-改-写模式（get → set/create）', () => {
+    const fnMatch = src.match(/recordMemeUsage = async[\s\S]+?\n  \}/)
+    const fnBody = fnMatch![0]
+    expect(fnBody).toContain("database.get('memes_usage_stats'")
+    expect(fnBody).toContain("database.set('memes_usage_stats'")
+    expect(fnBody).toContain("database.create('memes_usage_stats'")
+  })
+
+  it('recordMemeUsage 有并发重试（unique 冲突时继续）', () => {
+    const fnMatch = src.match(/recordMemeUsage = async[\s\S]+?\n  \}/)
+    const fnBody = fnMatch![0]
+    // 应有循环重试 + unique/duplicate/constraint 判断
+    expect(fnBody).toMatch(/for\s*\(\s*let\s+attempt/)
+    expect(fnBody).toMatch(/unique|duplicate|constraint/)
+  })
+})
