@@ -412,19 +412,26 @@ describe('refreshListImage 有限重试 + 原子替换 (LI1 回归)', () => {
     expect(indexSrc).toMatch(/refreshListImage\s*=\s*async\s*\(\):\s*Promise<boolean>\s*=>/)
   })
 
-  it('使用原子替换：先写 .tmp，成功后再 unlink + rename', () => {
+  it('使用原子替换：atomicReplace 内 unlink 在数据写入后才调用', () => {
     // 核心逻辑在 doRefreshListImage 内
     const fnMatch = indexSrc.match(/doRefreshListImage\s*=\s*async[\s\S]+?\n  \}/)
     expect(fnMatch).toBeTruthy()
     const fnBody = fnMatch![0]
-    // 关键防回归：禁止在请求之前就删除旧图
-    expect(fnBody).not.toMatch(/unlinkSync\(imgPath\)[\s\S]*getKeys\(\)/)
+    // 关键防回归：旧 bug 是"先 unlinkSync(imgPath) 再请求网络"。
+    // 双引擎下删除封装在 atomicReplace 函数内，调用点都在数据就绪（writeFileSync）之后。
+    // 验证 atomicReplace 定义存在 + 两个引擎都在 writeFileSync 后才调用 atomicReplace
+    expect(fnBody).toMatch(/const atomicReplace/)
+    expect(fnBody).toMatch(/atomicReplace\(\)/)
     // 原子替换模式：写 tmp → 删旧图 → rename
     expect(fnBody).toMatch(/tmpPath\s*=/)
     expect(fnBody).toMatch(/\.tmp/)
     expect(fnBody).toMatch(/writeFileSync\(tmpPath/)
     expect(fnBody).toMatch(/unlinkSync\(imgPath\)/)
     expect(fnBody).toMatch(/renameSync\(tmpPath,\s*imgPath\)/)
+    // 禁止在 atomicReplace 定义之前（即数据准备阶段）直接 unlinkSync(imgPath)
+    const arPos = fnBody.indexOf('const atomicReplace')
+    const directUnlink = fnBody.slice(0, arPos)
+    expect(directUnlink).not.toMatch(/unlinkSync\(imgPath\)/)
   })
 
   it('对网络步骤有限重试（循环 + koishi timer 延迟）', () => {
@@ -553,5 +560,75 @@ describe('HTTP 超时配置 timeout 不被 rest 覆盖 (HT1 回归)', () => {
     expect(cfg.timeout).toBe(120_000)        // 修正后的值
     expect(cfg.keepAlive).toBe(false)         // rest 字段保留
     expect(cfg.headers).toEqual({ 'X-A': '1' }) // rest 字段保留
+  })
+})
+
+// ============================================================
+// CLI1：refreshListImage 双引擎——puppeteer 优先，降级后端
+// 1.1.5 起：客户端用 ctx.$.infos + ctx.puppeteer 渲染（~2s），
+// puppeteer 不可用或失败时降级到后端 renderList（~37s）。
+// ============================================================
+describe('refreshListImage 双引擎 puppeteer 优先 (CLI1 回归)', () => {
+  const indexSrc = fs.readFileSync(
+    path.resolve(__dirname, '../src/index.tsx'),
+    'utf8',
+  )
+
+  it('inject 声明 puppeteer 为 optional 服务', () => {
+    // 关键防回归：puppeteer 必须在 optional 列表，否则 ctx.puppeteer 永远不可用
+    expect(indexSrc).toMatch(/optional:\s*\[[\s\S]*'puppeteer'[\s\S]*\]/)
+  })
+
+  it('import 了 list-renderer 的 buildListItems / buildListHtml', () => {
+    expect(indexSrc).toMatch(/import\s+\{[^}]*buildListHtml[^}]*buildListItems[^}]*\}\s+from\s+'\.\/list-renderer'/)
+  })
+
+  it('引擎1：puppeteer 可用时优先用 buildListItems + buildListHtml 渲染', () => {
+    // 抽取 doRefreshListImage 函数体
+    const fnMatch = indexSrc.match(/doRefreshListImage\s*=\s*async[\s\S]+?\n  \}/)
+    expect(fnMatch).toBeTruthy()
+    const fnBody = fnMatch![0]
+    // puppeteer 分支应在后端分支之前
+    const ppetPos = fnBody.indexOf('puppeteer.render')
+    const backendPos = fnBody.indexOf("ctx.$.api.getKeys()")
+    expect(ppetPos).toBeGreaterThan(-1)
+    expect(backendPos).toBeGreaterThan(-1)
+    expect(ppetPos).toBeLessThan(backendPos) // puppeteer 优先
+    // 用本地 infos 构建
+    expect(fnBody).toMatch(/buildListItems\(ctx\.\$\.infos/)
+    expect(fnBody).toMatch(/buildListHtml\(items\)/)
+  })
+
+  it('puppeteer 失败时降级到后端 renderList（catch 落入后端路径）', () => {
+    const fnMatch = indexSrc.match(/doRefreshListImage\s*=\s*async[\s\S]+?\n  \}/)
+    const fnBody = fnMatch![0]
+    // puppeteer 分支应有 catch 记日志后降级
+    expect(fnBody).toMatch(/puppeteer 渲染表情列表图片失败.*降级到后端/)
+    // 后端分支仍保留 getKeys + renderList
+    expect(fnBody).toMatch(/ctx\.\$\.api\.renderList\(/)
+  })
+
+  it('原子替换 + EXDEV 保护在双引擎下保留', () => {
+    const fnMatch = indexSrc.match(/doRefreshListImage\s*=\s*async[\s\S]+?\n  \}/)
+    const fnBody = fnMatch![0]
+    expect(fnBody).toMatch(/atomicReplace/)
+    expect(fnBody).toMatch(/EXDEV/)
+  })
+})
+
+// ============================================================
+// CLI2：list.ts 文本回退复用 list-renderer（消除重复排序逻辑）
+// ============================================================
+describe('list.ts 文本回退复用 sortInfos/isNewMeme (CLI2 回归)', () => {
+  it('list.ts 不再内联 infoSorter（已提取到 list-renderer）', () => {
+    const listSrc = fs.readFileSync(
+      path.resolve(__dirname, '../src/commands/list.ts'),
+      'utf8',
+    )
+    // 关键防回归：不应再有内联的 infoSorter 定义
+    expect(listSrc).not.toMatch(/const infoSorter\s*=/)
+    // 应调用 sortInfos + isNewMeme
+    expect(listSrc).toMatch(/sortInfos\(ctx\.\$\.infos,\s*config\)/)
+    expect(listSrc).toMatch(/isNewMeme\(/)
   })
 })

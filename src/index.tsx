@@ -12,6 +12,7 @@ import type { HttpConfig, MemeUsageRecord, GuildSettingRecord, UserBlockRecord }
 import { getGuildId } from './types/internal'
 import { errorMessage } from './utils'
 import type { ImageFetchInfo } from './cache'
+import { buildListHtml, buildListItems } from './list-renderer'
 import * as UserInfo from './user-info'
 
 import type { } from '@koishijs/plugin-help'
@@ -23,7 +24,7 @@ export const name = '@anyul/koishi-plugin-memes-api'
 
 export const inject = {
   required: ['http', 'database'],
-  optional: ['notifier'],
+  optional: ['notifier', 'puppeteer'],
 }
 
 export interface MemeInternal {
@@ -307,48 +308,77 @@ export async function apply(ctx: Context, config: Config) {
   let listImageInflight: Promise<boolean> | null = null
 
   // 实际执行刷新（不含并发合并）；返回 true=成功，false=全部重试失败（保留旧图）
+  // 双引擎：puppeteer 优先（用本地 infos 渲染，~2s）；不可用或失败时降级后端 renderList（~37s）
   const doRefreshListImage = async (): Promise<boolean> => {
     const cacheDir = path.resolve(config.cacheDir)
     fs.mkdirSync(cacheDir, { recursive: true })
     const imgPath = path.join(cacheDir, LIST_IMAGE_NAME)
     const tmpPath = `${imgPath}.tmp`
+
+    // 原子替换：tmp 与目标同目录（同卷）→ renameSync 原子；
+    // 极端情况下 cacheDir 跨卷（符号链接/junction）→ EXDEV，回退为 copy+unlink
+    const atomicReplace = () => {
+      try {
+        if (fs.existsSync(imgPath)) fs.unlinkSync(imgPath)
+        fs.renameSync(tmpPath, imgPath)
+      } catch (renameErr: any) {
+        if (renameErr?.code === 'EXDEV') {
+          fs.copyFileSync(tmpPath, imgPath)
+          fs.unlinkSync(tmpPath)
+        } else {
+          throw renameErr
+        }
+      }
+    }
+
+    // ---- 引擎 1：puppeteer 客户端渲染（优先，快）----
+    // 用本地 ctx.$.infos 构建 HTML，ctx.puppeteer.render 截图，无需后端
+    if ((ctx as any).puppeteer && Object.keys(ctx.$.infos).length > 0) {
+      try {
+        const items = buildListItems(ctx.$.infos, config)
+        const html = buildListHtml(items)
+        // ctx.puppeteer.render(html) 返回 h 元素，其 attrs 含 base64 data url
+        const hEl = await (ctx as any).puppeteer.render(html)
+        // h.image 的 toString() 给出 <img src="data:image/png;base64,..."/>，
+        // 从中提取 base64；或直接取 attrs.url/attrs.src
+        const dataUrl: string =
+          hEl?.attrs?.url || hEl?.attrs?.src || hEl?.toString?.().match(/src="([^"]+)"/)?.[1] || ''
+        const m = dataUrl.match(/^data:[^;]+;base64,(.+)$/)
+        if (m) {
+          fs.writeFileSync(tmpPath, Buffer.from(m[1], 'base64'))
+          atomicReplace()
+          logger.info(`表情列表图片已更新(puppeteer): ${imgPath}`)
+          return true
+        }
+        throw new Error('puppeteer.render 未返回有效 base64 图片数据')
+      } catch (e) {
+        logger.warn('puppeteer 渲染表情列表图片失败，降级到后端:', e)
+        // 落入下方后端降级路径
+      }
+    }
+
+    // ---- 引擎 2：后端 renderList（降级，慢但通用）----
     let lastErr: unknown
     for (let attempt = 1; attempt <= LIST_IMAGE_MAX_RETRIES; attempt++) {
       try {
-        // 向后端请求表情列表图片
         const keys = await ctx.$.api.getKeys()
         const blob = await ctx.$.api.renderList({
           meme_list: keys.map(k => ({ meme_key: k })),
           text_template: config.listTextTemplate,
           add_category_icon: config.listAddCategoryIcon,
         })
-        // 先写临时文件，确认成功后再替换旧图
         fs.writeFileSync(tmpPath, Buffer.from(await blob.arrayBuffer()))
-        // 原子替换：tmp 与目标同目录（同卷）→ renameSync 原子；
-        // 极端情况下 cacheDir 跨卷（符号链接/junction）→ EXDEV，回退为 copy+unlink
-        try {
-          if (fs.existsSync(imgPath)) fs.unlinkSync(imgPath)
-          fs.renameSync(tmpPath, imgPath)
-        } catch (renameErr: any) {
-          if (renameErr?.code === 'EXDEV') {
-            fs.copyFileSync(tmpPath, imgPath)
-            fs.unlinkSync(tmpPath)
-          } else {
-            throw renameErr
-          }
-        }
-        logger.info(`表情列表图片已更新: ${imgPath}`)
+        atomicReplace()
+        logger.info(`表情列表图片已更新(后端): ${imgPath}`)
         return true
       } catch (e) {
         lastErr = e
         if (attempt < LIST_IMAGE_MAX_RETRIES) {
           logger.warn(`刷新表情列表图片失败(第${attempt}次)，${LIST_IMAGE_RETRY_DELAY_MS}ms后重试:`, e)
-          // 用 koishi timer 绑定插件生命周期（卸载时自动取消），避免裸 setTimeout 泄露
           await new Promise<void>(r => (ctx as any).timer.setTimeout(r, LIST_IMAGE_RETRY_DELAY_MS))
         }
       }
     }
-    // 全部失败：清理 tmp，保留旧图（若有）
     try {
       if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath)
     } catch {
