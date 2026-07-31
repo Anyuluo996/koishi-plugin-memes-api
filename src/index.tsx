@@ -94,7 +94,8 @@ export interface MemeInternal {
 
   reRegisterGenerateCommands(): Promise<void>
   refreshShortcuts(): Promise<void>
-  refreshListImage(): Promise<void>
+  /** 刷新表情列表图片。成功返回 true，全部重试失败返回 false（保留旧图） */
+  refreshListImage(): Promise<boolean>
   getListImagePath(): string | undefined
   invalidateFindMemeCache(): void
   invalidateAllCaches(): void
@@ -291,26 +292,78 @@ export async function apply(ctx: Context, config: Config) {
 
   // 表情列表图片路径
   const LIST_IMAGE_NAME = 'meme-list.png'
+  // 刷新表情列表图片的有限重试参数（对抗后端瞬时不可用）
+  const LIST_IMAGE_MAX_RETRIES = 3
+  const LIST_IMAGE_RETRY_DELAY_MS = 2000
 
   // 表情列表图片：下载并保存到缓存目录
-  ctx.$.refreshListImage = async () => {
+  // 设计要点：
+  //   1. 原子替换：先写 .tmp，全部重试成功后再删旧图 + rename，避免失败时丢图
+  //   2. 有限重试：对网络步骤（getKeys + renderList）重试 LIST_IMAGE_MAX_RETRIES 次
+  //   3. 并发合并：inflight 防止 N 个并发调用击穿后端（对齐 blacklistInflight / RenderCache.dedup 范式）
+  //   4. 不吞错：返回布尔，让上层（list 命令、初始化）可感知成败
+  let listImageInflight: Promise<boolean> | null = null
+
+  // 实际执行刷新（不含并发合并）；返回 true=成功，false=全部重试失败（保留旧图）
+  const doRefreshListImage = async (): Promise<boolean> => {
+    const cacheDir = path.resolve(config.cacheDir)
+    fs.mkdirSync(cacheDir, { recursive: true })
+    const imgPath = path.join(cacheDir, LIST_IMAGE_NAME)
+    const tmpPath = `${imgPath}.tmp`
+    let lastErr: unknown
+    for (let attempt = 1; attempt <= LIST_IMAGE_MAX_RETRIES; attempt++) {
+      try {
+        // 向后端请求表情列表图片
+        const keys = await ctx.$.api.getKeys()
+        const blob = await ctx.$.api.renderList({
+          meme_list: keys.map(k => ({ meme_key: k })),
+          text_template: config.listTextTemplate,
+          add_category_icon: config.listAddCategoryIcon,
+        })
+        // 先写临时文件，确认成功后再替换旧图
+        fs.writeFileSync(tmpPath, Buffer.from(await blob.arrayBuffer()))
+        // 原子替换：tmp 与目标同目录（同卷）→ renameSync 原子；
+        // 极端情况下 cacheDir 跨卷（符号链接/junction）→ EXDEV，回退为 copy+unlink
+        try {
+          if (fs.existsSync(imgPath)) fs.unlinkSync(imgPath)
+          fs.renameSync(tmpPath, imgPath)
+        } catch (renameErr: any) {
+          if (renameErr?.code === 'EXDEV') {
+            fs.copyFileSync(tmpPath, imgPath)
+            fs.unlinkSync(tmpPath)
+          } else {
+            throw renameErr
+          }
+        }
+        logger.info(`表情列表图片已更新: ${imgPath}`)
+        return true
+      } catch (e) {
+        lastErr = e
+        if (attempt < LIST_IMAGE_MAX_RETRIES) {
+          logger.warn(`刷新表情列表图片失败(第${attempt}次)，${LIST_IMAGE_RETRY_DELAY_MS}ms后重试:`, e)
+          // 用 koishi timer 绑定插件生命周期（卸载时自动取消），避免裸 setTimeout 泄露
+          await new Promise<void>(r => (ctx as any).timer.setTimeout(r, LIST_IMAGE_RETRY_DELAY_MS))
+        }
+      }
+    }
+    // 全部失败：清理 tmp，保留旧图（若有）
     try {
-      const cacheDir = path.resolve(config.cacheDir)
-      fs.mkdirSync(cacheDir, { recursive: true })
-      const imgPath = path.join(cacheDir, LIST_IMAGE_NAME)
-      // 删除旧图
-      if (fs.existsSync(imgPath)) fs.unlinkSync(imgPath)
-      // 向后端请求表情列表图片
-      const keys = await ctx.$.api.getKeys()
-      const blob = await ctx.$.api.renderList({
-        meme_list: keys.map(k => ({ meme_key: k })),
-        text_template: config.listTextTemplate,
-        add_category_icon: config.listAddCategoryIcon,
-      })
-      fs.writeFileSync(imgPath, Buffer.from(await blob.arrayBuffer()))
-      logger.info(`表情列表图片已更新: ${imgPath}`)
-    } catch (e) {
-      logger.warn('刷新表情列表图片失败:', e)
+      if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath)
+    } catch {
+      // tmp 清理失败不致命
+    }
+    logger.warn(`刷新表情列表图片失败，已重试${LIST_IMAGE_MAX_RETRIES}次:`, lastErr)
+    return false
+  }
+
+  ctx.$.refreshListImage = async (): Promise<boolean> => {
+    // 并发合并：已在进行中的刷新直接复用其 Promise，避免并发击穿后端
+    if (listImageInflight) return listImageInflight
+    listImageInflight = doRefreshListImage()
+    try {
+      return await listImageInflight
+    } finally {
+      listImageInflight = null
     }
   }
 
@@ -1041,8 +1094,8 @@ export async function apply(ctx: Context, config: Config) {
     }, afterInitDelay)
   logger.info(`Plugin initialized successfully, loaded ${memeCount} memes`)
 
-  // 后台生成表情列表图片（仅在表情加载成功后才请求）
-  if (memeCount > 0) {
-    ctx.$.refreshListImage().catch(() => {})
-  }
+  // 后台生成表情列表图片（内部含有限重试，失败不影响启动）。
+  // 不再以 memeCount > 0 为前置条件：即便 updateInfos 全部失败，
+  // 也尝试刷新列表图片，避免用户陷入"永远没有列表图"的状态。
+  ctx.$.refreshListImage().catch(() => {})
 }

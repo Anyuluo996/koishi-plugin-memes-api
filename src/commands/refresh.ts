@@ -31,10 +31,15 @@ export async function apply(ctx: Context, config: Config) {
       await ctx.$.refreshShortcuts?.()
 
       // 刷新表情列表图片（仅需一次，之前由于复制粘贴被调用了两次）
-      await ctx.$.refreshListImage()
+      const listImageOk = await ctx.$.refreshListImage()
 
       const totalMemes = Object.keys(ctx.$.infos).length
-      await session.send(`✅ 表情信息更新完成！共获取到 ${totalMemes} 个表情包。`)
+      if (listImageOk) {
+        await session.send(`✅ 表情信息更新完成！共获取到 ${totalMemes} 个表情包。`)
+      } else {
+        // 列表图片刷新失败：表情信息已更新，但图片可能仍是旧的或缺失
+        await session.send(`⚠️ 表情信息更新完成！共获取到 ${totalMemes} 个表情包，但列表图片刷新失败（后端可能不可用，可稍后重试）。`)
+      }
     } catch (error) {
       logger.warn('手动获取表情信息失败', error)
       await session.send(`❌ 获取表情信息失败: ${errorMessage(error)}`)

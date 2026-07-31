@@ -390,3 +390,112 @@ describe('recordMemeUsage SQLite 兼容性 (M1-2 回归)', () => {
     expect(fnBody).toMatch(/unique|duplicate|constraint/)
   })
 })
+
+// ============================================================
+// LI1：表情列表图片刷新失败应有限重试 + 原子替换（旧图不被丢失）
+// 修复前：先 unlinkSync 删旧图再发网络请求，请求失败则列表图永久丢失且无重试。
+// 修复后：先写 .tmp，成功后 unlink + rename 原子替换；网络步骤有限重试；
+//         inflight 合并防并发击穿；EXDEV 跨卷回退。
+// ============================================================
+describe('refreshListImage 有限重试 + 原子替换 (LI1 回归)', () => {
+  const indexSrc = fs.readFileSync(
+    path.resolve(__dirname, '../src/index.tsx'),
+    'utf8',
+  )
+
+  it('refreshListImage 返回 Promise<boolean>（接口声明）', () => {
+    // 接口签名：不再吞错为 void，便于上层感知成败
+    expect(indexSrc).toMatch(/refreshListImage\(\):\s*Promise<boolean>/)
+  })
+
+  it('refreshListImage 实现声明为 Promise<boolean>', () => {
+    expect(indexSrc).toMatch(/refreshListImage\s*=\s*async\s*\(\):\s*Promise<boolean>\s*=>/)
+  })
+
+  it('使用原子替换：先写 .tmp，成功后再 unlink + rename', () => {
+    // 核心逻辑在 doRefreshListImage 内
+    const fnMatch = indexSrc.match(/doRefreshListImage\s*=\s*async[\s\S]+?\n  \}/)
+    expect(fnMatch).toBeTruthy()
+    const fnBody = fnMatch![0]
+    // 关键防回归：禁止在请求之前就删除旧图
+    expect(fnBody).not.toMatch(/unlinkSync\(imgPath\)[\s\S]*getKeys\(\)/)
+    // 原子替换模式：写 tmp → 删旧图 → rename
+    expect(fnBody).toMatch(/tmpPath\s*=/)
+    expect(fnBody).toMatch(/\.tmp/)
+    expect(fnBody).toMatch(/writeFileSync\(tmpPath/)
+    expect(fnBody).toMatch(/unlinkSync\(imgPath\)/)
+    expect(fnBody).toMatch(/renameSync\(tmpPath,\s*imgPath\)/)
+  })
+
+  it('对网络步骤有限重试（循环 + koishi timer 延迟）', () => {
+    const fnMatch = indexSrc.match(/doRefreshListImage\s*=\s*async[\s\S]+?\n  \}/)
+    const fnBody = fnMatch![0]
+    // 重试循环 + 延迟（用 koishi timer 绑定生命周期，禁用裸 setTimeout）
+    expect(fnBody).toMatch(/for\s*\(\s*let\s+attempt/)
+    expect(fnBody).toMatch(/\(ctx as any\)\.timer\.setTimeout/)
+    // 禁止裸 setTimeout（会脱离插件生命周期）
+    expect(fnBody).not.toMatch(/new Promise\(r\s*=>\s*setTimeout\(/)
+    // 重试常量
+    expect(fnBody).toMatch(/LIST_IMAGE_MAX_RETRIES/)
+  })
+
+  it('全部失败时返回 false 且清理 tmp 文件', () => {
+    const fnMatch = indexSrc.match(/doRefreshListImage\s*=\s*async[\s\S]+?\n  \}/)
+    const fnBody = fnMatch![0]
+    expect(fnBody).toMatch(/return false/)
+    expect(fnBody).toMatch(/unlinkSync\(tmpPath\)/)
+  })
+
+  it('EXDEV 跨卷保护：renameSync 失败时回退 copy + unlink', () => {
+    const fnMatch = indexSrc.match(/doRefreshListImage\s*=\s*async[\s\S]+?\n  \}/)
+    const fnBody = fnMatch![0]
+    expect(fnBody).toMatch(/EXDEV/)
+    expect(fnBody).toMatch(/copyFileSync\(tmpPath,\s*imgPath\)/)
+  })
+
+  it('并发合并 inflight：防止 N 个并发请求击穿后端', () => {
+    // refreshListImage 包装器应复用进行中的 Promise
+    const wrapMatch = indexSrc.match(/ctx\.\$\.refreshListImage\s*=\s*async[\s\S]+?\n  \}/)
+    expect(wrapMatch).toBeTruthy()
+    const wrapBody = wrapMatch![0]
+    expect(wrapBody).toMatch(/listImageInflight/)
+    expect(wrapBody).toMatch(/if\s*\(listImageInflight\)\s*return\s+listImageInflight/)
+  })
+})
+
+// ============================================================
+// LI2：list 命令在图片缺失时应自动触发 refreshListImage
+// 修复前：图片缺失走文本回退，从不调用 refreshListImage()，缓存永远不会被填充。
+// 修复后：缺失时先 await refreshListImage()，成功后发图，仍失败才回退。
+// ============================================================
+describe('list 命令图片缺失时自动触发 refreshListImage (LI2 回归)', () => {
+  it('list.ts 在 !imgPath 分支调用 refreshListImage()', () => {
+    const listSrc = fs.readFileSync(
+      path.resolve(__dirname, '../src/commands/list.ts'),
+      'utf8',
+    )
+    // 关键防回归：缺失分支必须主动触发后端渲染
+    expect(listSrc).toMatch(/refreshListImage\(\)/)
+    // 使用 let imgPath 以便缺失后重新取值
+    expect(listSrc).toMatch(/let imgPath = ctx\.\$\.getListImagePath\(\)/)
+  })
+})
+
+// ============================================================
+// LI3：refresh 命令应使用 refreshListImage 返回值给用户反馈
+// 修复前：忽略返回值，即使图片刷新失败也显示"✅ 完成"。
+// 修复后：返回 false 时改为"⚠️ ... 列表图片刷新失败"提示。
+// ============================================================
+describe('refresh 命令消费 refreshListImage 返回值 (LI3 回归)', () => {
+  it('refresh.ts 根据 listImageOk 区分成功/失败提示', () => {
+    const refreshSrc = fs.readFileSync(
+      path.resolve(__dirname, '../src/commands/refresh.ts'),
+      'utf8',
+    )
+    // 关键防回归：必须消费返回值
+    expect(refreshSrc).toMatch(/=\s*await\s+ctx\.\$\.refreshListImage\(\)/)
+    expect(refreshSrc).toMatch(/if\s*\(listImageOk\)/)
+    // 失败分支应包含"列表图片刷新失败"提示
+    expect(refreshSrc).toMatch(/列表图片刷新失败/)
+  })
+})

@@ -19,7 +19,13 @@ export async function apply(ctx: Context, config: Config) {
     if (!session) return
 
     // 直接发送缓存的表情列表图片
-    const imgPath = ctx.$.getListImagePath()
+    let imgPath = ctx.$.getListImagePath()
+    if (!imgPath) {
+      // 图片未生成（如启动时刷新失败）：自动触发后端渲染并缓存，避免用户陷入"永远没有列表图"。
+      // refreshListImage 内部含有限重试；这里同步等待，成功后本次即可发图，仍失败则回退到文本列表。
+      await ctx.$.refreshListImage()
+      imgPath = ctx.$.getListImagePath()
+    }
     if (imgPath) {
       const buf = fs.readFileSync(imgPath)
       // h.image(Buffer, mimeString) 会自动转为 data:image/png;base64,... 格式
