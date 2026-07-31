@@ -188,9 +188,11 @@ export async function apply(ctx: Context, config: Config) {
   // === API 初始化 ===
   let httpConfig: HttpConfig
   if (config.requestConfig && typeof config.requestConfig === 'object') {
-    const { endpoint, ...rest } = config.requestConfig
-    // 用户配置优先，超时过短时（< 60s）自动提升，防止 933 个表情请求超时
-    const userTimeout = (config.requestConfig as any)?.timeout
+    // 注意：timeout 必须从 requestConfig 中解构出来，否则会残留在 rest 里，
+    // 经 { ..., timeout, ...rest } spread 时覆盖下方修正后的 timeout。
+    // 此前 bug：默认 timeout=10s 泄漏覆盖 120s，导致 render_list（实测 957 表情约 37s）必超时。
+    const { endpoint, timeout: userTimeout, ...rest } = config.requestConfig
+    // 用户配置优先，超时过短时（< 60s）自动提升，防止大量表情的 render_list 请求超时
     const timeout = userTimeout && userTimeout >= 60_000 ? userTimeout : 120_000
     httpConfig = { baseURL: endpoint, timeout, ...rest }
   } else {

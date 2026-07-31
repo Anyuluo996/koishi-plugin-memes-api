@@ -499,3 +499,59 @@ describe('refresh 命令消费 refreshListImage 返回值 (LI3 回归)', () => {
     expect(refreshSrc).toMatch(/列表图片刷新失败/)
   })
 })
+
+// ============================================================
+// HT1：HTTP 超时配置——timeout 必须从 requestConfig 解构出来，防止 rest 泄漏覆盖
+// 根因：config.requestConfig 默认 timeout=10s。原代码 `const { endpoint, ...rest }`
+// 未解构 timeout，rest 仍含 timeout=10s，经 { ..., timeout: 120000, ...rest } spread
+// 覆盖修正值，导致 render_list（957 表情实测 ~37s）必在 10s 超时（ETIMEDOUT）。
+// 修复：`const { endpoint, timeout: userTimeout, ...rest }` 把 timeout 从 rest 剥离。
+// ============================================================
+describe('HTTP 超时配置 timeout 不被 rest 覆盖 (HT1 回归)', () => {
+  // 镜像 index.tsx 修复后的 httpConfig 构建逻辑（纯数据处理，可独立单测）
+  const buildHttpConfig = (requestConfig: any) => {
+    if (requestConfig && typeof requestConfig === 'object') {
+      const { endpoint, timeout: userTimeout, ...rest } = requestConfig
+      const timeout = userTimeout && userTimeout >= 60_000 ? userTimeout : 120_000
+      return { baseURL: endpoint, timeout, ...rest }
+    }
+    return { baseURL: 'http://127.0.0.1:2233', timeout: 120_000 }
+  }
+
+  it('默认 timeout=10s 应被提升到 120s，而非泄漏覆盖', () => {
+    const cfg = buildHttpConfig({ endpoint: 'http://x', timeout: 10000, keepAlive: true })
+    // 关键防回归：10s 不得泄漏到最终 httpConfig
+    expect(cfg.timeout).toBe(120_000)
+    expect(cfg.timeout).not.toBe(10_000)
+  })
+
+  it('用户配置 timeout=180s（>=60s）应原样保留', () => {
+    const cfg = buildHttpConfig({ endpoint: 'http://x', timeout: 180_000, keepAlive: true })
+    expect(cfg.timeout).toBe(180_000)
+  })
+
+  it('用户配置 timeout=60s（边界）应保留', () => {
+    const cfg = buildHttpConfig({ endpoint: 'http://x', timeout: 60_000 })
+    expect(cfg.timeout).toBe(60_000)
+  })
+
+  it('未配置 timeout 时默认 120s', () => {
+    const cfg = buildHttpConfig({ endpoint: 'http://x', keepAlive: true })
+    expect(cfg.timeout).toBe(120_000)
+  })
+
+  it('requestConfig 非 object 走 else 分支（120s）', () => {
+    const cfg = buildHttpConfig(null)
+    expect(cfg.timeout).toBe(120_000)
+    expect(cfg.baseURL).toBe('http://127.0.0.1:2233')
+  })
+
+  it('rest 中其他字段（如 keepAlive/headers）应保留，但不污染 timeout', () => {
+    const cfg = buildHttpConfig({
+      endpoint: 'http://x', timeout: 10000, keepAlive: false, headers: { 'X-A': '1' },
+    })
+    expect(cfg.timeout).toBe(120_000)        // 修正后的值
+    expect(cfg.keepAlive).toBe(false)         // rest 字段保留
+    expect(cfg.headers).toEqual({ 'X-A': '1' }) // rest 字段保留
+  })
+})
